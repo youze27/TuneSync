@@ -111,9 +111,8 @@
               <el-button style="margin-left: 10px" :icon="Search" :loading="loading" @click="loadCandidates">
                 载入候选
               </el-button>
-              <el-button text :disabled="!candidates.length" @click="clearSelection">清空勾选</el-button>
               <div class="muted tip">
-                勾选后只刮选中的行；不勾选就直接按上面的「范围 + 上限」跑
+                清单只读、先看缺口；点开始就按上面的「范围 + 上限」全部跑
               </div>
             </el-form-item>
 
@@ -127,9 +126,6 @@
               >
                 {{ runState.running ? '刮削进行中…' : startLabel }}
               </el-button>
-              <span v-if="selected.length" class="muted" style="margin-left: 10px; font-size: 12px">
-                已勾选 {{ selected.length }} 首
-              </span>
             </el-form-item>
           </el-form>
 
@@ -229,7 +225,6 @@
           </template>
 
           <el-table
-            ref="tableRef"
             v-loading="loading"
             :data="shownRows"
             row-key="path"
@@ -237,9 +232,7 @@
             border
             stripe
             height="calc(100vh - 620px)"
-            @selection-change="(rows) => (selected = rows)"
           >
-            <el-table-column type="selection" width="46" reserve-selection />
             <el-table-column prop="title" label="歌名" min-width="150" show-overflow-tooltip />
             <el-table-column prop="artist" label="歌手" min-width="110" show-overflow-tooltip />
             <el-table-column label="状态" width="90" align="center">
@@ -346,7 +339,6 @@ import * as api from '../api.js'
 
 const loading = ref(false)
 const saving = ref(false)
-const tableRef = ref(null)
 
 // ───────────────────────────── 统计概览
 
@@ -453,7 +445,6 @@ const scope = ref('missing')
 const runLimit = ref(0)
 const previewLimit = ref(200)
 const candidates = ref([])
-const selected = ref([])
 
 // 清单状态过滤（借鉴 music-meta-web 的顶部过滤器），纯前端切片，不重新请求
 // todo 由后端按「缺任一字段」算好，与统计口径同源，避免两边对不上
@@ -502,7 +493,6 @@ const progressPct = computed(() => {
 })
 
 const startLabel = computed(() => {
-  if (selected.value.length) return `刮削勾选的 ${selected.value.length} 首`
   if (runLimit.value) return `刮削 ${runLimit.value} 首`
   return scope.value === 'all' ? '刮削全库' : '刮削全部待补文件'
 })
@@ -513,7 +503,6 @@ async function loadCandidates() {
     const res = await api.getScrapeCandidates({ scope: scope.value, limit: previewLimit.value })
     candidates.value = res?.items || []
     applyStats(res?.stats)
-    clearSelection()
   } catch (e) {
     api.toastError(e, '载入待刮削清单失败')
   } finally {
@@ -521,14 +510,8 @@ async function loadCandidates() {
   }
 }
 
-function clearSelection() {
-  tableRef.value?.clearSelection()
-  selected.value = []
-}
-
 async function run() {
-  const paths = selected.value.map((r) => r.path)
-  if (!paths.length && scope.value === 'all') {
+  if (scope.value === 'all') {
     try {
       await ElMessageBox.confirm(
         '「全库重来」会重新读一遍所有文件的标签，量大时很慢。确定继续？',
@@ -553,7 +536,7 @@ async function run() {
   }
   loading.value = true
   try {
-    await api.runScrape({ paths, scope: scope.value, limit: runLimit.value })
+    await api.runScrape({ scope: scope.value, limit: runLimit.value })
     // 先乐观标成运行中：刮削很快时，第一次轮询可能就已经结束了
     Object.assign(runState, {
       running: true, done: 0, ok: 0, failed: 0, ended_at: null,
@@ -561,7 +544,6 @@ async function run() {
     runErrors.value = []
     runLogs.value = []
     opened.value = new Set()
-    clearSelection()
     startPolling()
     ElMessage.success('已开始刮削，进度见下方')
   } catch (e) {

@@ -588,6 +588,8 @@ tunesync/
 - **下载重试**：`download.retry`（默认 2 = 共尝试 3 次），间隔 2s/4s 递增；最终失败 error 记「重试 N 次仍失败：原因」。
 - **空候选预检**：刮削 run 前无候选直接 400「没有待刮削的文件」；前端轮询连续失败 ≥4 次才停（防网络抖动误判）。
 
+**手动刮削入口**：`POST /api/scrape/run` 只接 `{scope, limit}`，**一律按范围+上限全量跑，不支持挑选子集**；前端候选清单只读展示（可筛选 全部/待补/已补全），不再有勾选修改功能——勾几首跑几首的「部分刮削」已删除。
+
 ## 3.7 定时刮削（auto_scrape）
 
 `scraper.auto_scrape = {enabled, cron, limit}`（默认 `0 4 * * *`、500 首）：scheduler 启动与 `reload_config()` 都重建 `auto-scrape` job；运行中或无候选时自动跳过。手动刮削的运行选项（`manual_scope/manual_limit/preview_limit`）同样持久化在 scraper 节，前端「先保存再运行」保证所见即所跑。

@@ -1260,7 +1260,6 @@ def scrape_candidates(scope: str = "missing", limit: int = 200):
 
 
 class ScrapeRunIn(BaseModel):
-    paths: list[str] = Field(default_factory=list)
     # missing 只补缺字段的（流派/年份/封面/歌词/没刮过）/ all 全库重来
     scope: str = "missing"
     limit: int = Field(default=0, ge=0, le=20000)
@@ -1268,15 +1267,17 @@ class ScrapeRunIn(BaseModel):
 
 @router.post("/scrape/run", tags=["刮削"])
 def scrape_run(body: ScrapeRunIn):
-    """手动批量刮削，立即返回，进度走 WebSocket 或 /scrape/status 轮询。"""
+    """手动批量刮削，立即返回，进度走 WebSocket 或 /scrape/status 轮询。
+
+    一律按「范围 + 上限」全量跑，不支持挑选子集——前端候选清单只是预览。
+    """
     # 先预检候选：空任务直接报错，而不是后台跑了个 0/0 的空转，
     # 用户侧表现成「点了开始没反应」
-    probe = resolver.scrape_candidates(scope=body.scope, paths=body.paths or None, limit=1)
+    probe = resolver.scrape_candidates(scope=body.scope, limit=1)
     if not probe:
         raise HTTPException(400, "没有待刮削的文件：可把范围切到「全库重来」再试")
     try:
-        return resolver.scrape_async(paths=body.paths or None,
-                                      scope=body.scope, limit=body.limit)
+        return resolver.scrape_async(scope=body.scope, limit=body.limit)
     except RuntimeError as e:
         raise HTTPException(409, str(e))
 

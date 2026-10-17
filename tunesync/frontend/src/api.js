@@ -36,7 +36,8 @@ http.interceptors.response.use(
     // 会话过期/未登录时后端一律回 401，这里统一弹一次提示并把地址交给页面跳登录页。
     // 登录接口本身的 401 是「口令错」，交给 Login.vue 自己展示，不要在这里抢跳。
     if (e?.response?.status === 401 && !e.config?.url?.includes('/auth/')) {
-      window.dispatchEvent(new CustomEvent('ts:unauthorized'))
+      // contract.mjs 在 Node 里运行没有 window，直接跳过浏览器事件广播
+      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('ts:unauthorized'))
     }
     return Promise.reject(e)
   },
