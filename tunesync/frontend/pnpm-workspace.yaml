@@ -1,0 +1,10 @@
+# pnpm 11 从本文件读取项目级设置（.npmrc 只保留 registry 之类的 npm 兼容项）。
+# 扁平化 node_modules：pnpm 默认的 isolated 布局下，vite 依赖 esbuild 只能通过
+# .pnpm 内部的 junction 找到，而 Node 从 node_modules/vite 这一层向上解析时看不到它，
+# 会报 ERR_MODULE_NOT_FOUND: Cannot find package 'esbuild'。
+nodeLinker: hoisted
+
+# 放开 esbuild 的安装脚本：它的 install.js 负责把平台二进制挂到正确位置，
+# 跳过会导致 vite 构建失败。
+allowBuilds:
+  esbuild: true

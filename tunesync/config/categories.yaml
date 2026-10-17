@@ -1,0 +1,68 @@
+# TuneSync 推送场景
+#
+# 场景 = 喂给大模型的推送主题：LLM 按场景生成仿平台风格的结构化歌单
+# （歌名+歌手），再走 本地匹配 → 在线下载 → 刮削 → 写入推送平台。
+#
+# code   唯一标识，写进 fetch_task.categories 与歌单命名模板
+# name   中文名，同时用作 LLM 的场景描述
+# group  分组：special | activity | mood | style（前端按此分组展示）
+#
+# 需要增删场景直接改本文件，重启容器生效。
+
+categories:
+# ── 特殊 ─────────────────────────────────────────────
+- { code: douyin,      name: 抖音热歌, group: special }
+
+# ── 按活动（16）─────────────────────────────────────
+- { code: study,       name: 学习,     group: activity }
+- { code: workout,     name: 运动,     group: activity }
+- { code: commute,     name: 通勤,     group: activity }
+- { code: sleep,       name: 睡眠,     group: activity }
+- { code: party,       name: 派对,     group: activity }
+- { code: date,        name: 约会,     group: activity }
+- { code: dinner,      name: 晚餐,     group: activity }
+- { code: travel,      name: 旅行,     group: activity }
+- { code: driving,     name: 开车,     group: activity }
+- { code: cleaning,    name: 打扫家务, group: activity }
+- { code: cooking,     name: 做饭,     group: activity }
+- { code: baby,        name: 哄睡,     group: activity }
+- { code: focus,       name: 专注工作, group: activity }
+- { code: gaming,      name: 游戏,     group: activity }
+- { code: rain,        name: 雨天,     group: activity }
+- { code: alone,       name: 独处,     group: activity }
+
+# ── 按心情（16）─────────────────────────────────────
+- { code: healing,     name: 治愈,     group: mood }
+- { code: energetic,   name: 活力,     group: mood }
+- { code: chill,       name: 放松,     group: mood }
+- { code: romantic,    name: 浪漫,     group: mood }
+- { code: sad,         name: 伤感,     group: mood }
+- { code: nostalgic,   name: 怀旧,     group: mood }
+- { code: lonely,      name: 孤独,     group: mood }
+- { code: happy,       name: 快乐,     group: mood }
+- { code: calm,        name: 平静,     group: mood }
+- { code: miss,        name: 想念,     group: mood }
+- { code: hotblood,    name: 热血,     group: mood }
+- { code: sweet,       name: 甜蜜,     group: mood }
+- { code: crazy,       name: 疯狂,     group: mood }
+- { code: peaceful,    name: 安逸,     group: mood }
+- { code: melancholic, name: 感伤,     group: mood }
+- { code: hopeful,     name: 治愈励志, group: mood }
+
+# ── 按风格（16）─────────────────────────────────────
+- { code: guofeng,     name: 国风,     group: style }
+- { code: electronic,  name: 电子,     group: style }
+- { code: hiphop,      name: 嘻哈,     group: style }
+- { code: rock,        name: 摇滚,     group: style }
+- { code: pop,         name: 流行,     group: style }
+- { code: classical,   name: 古典,     group: style }
+- { code: jazz,        name: 爵士,     group: style }
+- { code: folk,        name: 民谣,     group: style }
+- { code: ballad,      name: 抒情,     group: style }
+- { code: dance,       name: 舞曲,     group: style }
+- { code: instrumental, name: 纯音乐,  group: style }
+- { code: piano,       name: 钢琴,     group: style }
+- { code: guitar,      name: 吉他,     group: style }
+- { code: citypop,     name: 都市流行, group: style }
+- { code: rnb,         name: R&B,      group: style }
+- { code: acoustic,    name: 不插电,   group: style }

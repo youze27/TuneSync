@@ -1,0 +1,12 @@
+# TuneSync 运行时依赖
+# 安装：pip install -r requirements.txt
+#
+# 版本约束按「已验证可用」收窄，避免上游大版本变更直接打穿容器。
+
+fastapi>=0.115,<0.116        # REST + WebSocket
+uvicorn[standard]>=0.30      # ASGI 服务器
+PyYAML>=6.0                 # config.yaml / categories.yaml
+requests>=2.31              # 平台与音源的 HTTP 调用
+mutagen>=1.47                # 音频标签读写（ID3 / Vorbis / MP4）
+APScheduler>=3.10,<4.0       # 定时任务
+loguru>=0.7                  # 分模块结构化日志，按天滚动到 data/logs/

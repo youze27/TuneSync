@@ -1,0 +1,24 @@
+{
+  "name": "tunesync-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "TuneSync 自托管歌单同步引擎 · Vue3 管理界面",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "axios": "^1.7.7",
+    "element-plus": "^2.8.8",
+    "vue": "^3.5.13",
+    "vue-router": "^4.4.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "terser": "^5.36.0",
+    "vite": "^5.4.11"
+  }
+}

@@ -1,0 +1,26 @@
+# Docker 构建上下文是 deploy/ 目录本身（自包含 NAS 部署目录）。
+# pack-deploy.cmd 同步源码时已按相同规则排除，这里再兜一道底。
+
+.git
+.gitignore
+**/__pycache__/
+**/*.pyc
+**/node_modules/
+**/dist/
+**/.pytest_cache/
+data/
+.tmp/
+pytest-cache-files-*/
+
+# 前端在镜像内重新 pnpm build，不用本地构建产物
+app/static/
+# pytest 临时工作目录
+tests/.work/
+
+# 真实环境变量与运行期数据
+.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log

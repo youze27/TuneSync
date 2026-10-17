@@ -1,0 +1,91 @@
+# ============================================================================
+# TuneSync 版本库忽略清单
+#
+# 原则：只提交「源码 + 文档 + 部署骨架」。
+#   - 运行期产生的数据（SQLite、日志、下载缓存、备份）一律不进库
+#   - 密钥/口令/个人地址（.env、config.local.yaml）一律不进库
+#   - 构建产物（前端 bundle、deploy 同步副本、镜像 tar 包）一律不进库，
+#     它们都能由源码重新生成（镜像构建时会跑 pnpm build 与 pack-deploy 同步）
+# ============================================================================
+
+# ── 密钥与本地覆盖配置（最高优先级，永远不许进库）────────────────────
+.env
+config.local.yaml
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# ── 运行期数据（SQLite 状态库 / 日志 / 备份 / 下载临时区）────────────
+tunesync/data/
+tunesync/logs/
+tunesync/backups/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+
+# ── 前端构建产物 ────────────────────────────────────────────────────
+# app/static 由 Dockerfile 在镜像构建阶段跑 pnpm build 重新生成；
+# 本地 pnpm build 也会输出到这里，别提交。
+tunesync/app/static/
+node_modules/
+tunesync/frontend/node_modules/
+.pnpm-store/
+
+# ── deploy 目录的同步副本 ──────────────────────────────────────────
+# tunesync/deploy/ 是自包含 NAS 部署目录：Dockerfile、docker-compose.yml、
+# .env.example、.dockerignore 这些「骨架」入库；app/ config/ frontend/
+# tests/ 等由 tools/pack-deploy.cmd 从开发目录同步过去的副本不入库。
+tunesync/deploy/app/
+tunesync/deploy/config/
+tunesync/deploy/frontend/
+tunesync/deploy/tests/
+tunesync/deploy/data/
+tunesync/deploy/pytest.ini
+tunesync/deploy/*.txt
+tunesync/deploy/conftest.py
+tunesync/deploy/test_*.py
+
+# ── 镜像导出与打包产物（大文件）─────────────────────────────────────
+*.tar
+*.tar.gz
+.deploy-tmp/
+
+# ── Python ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+tunesync/.venv/
+# .pylibs 是本地开发依赖目录（tools/setup_env.cmd 的产物）
+.pylibs/
+.pytest_cache/
+# pytest 建的临时目录；受限沙箱下 ACL 不可读，删不掉也不该进库
+pytest-cache-files-*/
+# pip 中断留下的临时目录
+pip-*/
+
+# ── 本地工具与临时文件 ──────────────────────────────────────────────
+tmp_*
+.acl-out/
+.tmp/
+tunesync/tests/.work/
+tunesync/deploy - 副本/
+tunesync/pip-build-tracker-*/
+tunesync/pip-ephem-wheel-cache-*/
+tunesync/pip-install-*/
+
+# ── 代理 / IDE 工作区（可能含本机路径等隐私信息）────────────────────
+.trae/
+.workbuddy/
+.vscode/
+.idea/
+
+# ── 操作系统 ────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.lnk

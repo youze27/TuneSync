@@ -1,0 +1,145 @@
+# TuneSync 配置
+#
+# 本文件是默认值，UI 里保存的配置会覆盖同名配置节（存进 data/tunesync.db 的 kv 表）。
+# 改完本文件需要重启容器；改 UI 配置立即生效。
+
+server:
+  # 8066：Chrome/Firefox 把 6665-6669 列入「不安全端口」黑名单（IRC），
+  # 浏览器会直接拒绝连接、报 ERR_UNSAFE_PORT，而且根本不发请求——
+  # 命令行一切正常，只有浏览器打不开。默认端口别改回 6666。
+  port: 8066
+  timezone: Asia/Shanghai
+
+# ── 登录校验 ───────────────────────────────────────────
+# 默认开启：部署后第一次打开引导创建管理员账号，之后所有 /api 都要会话。
+# 已建好账号又忘了口令时，用环境变量 TUNESYNC_AUTH=off 临时放行，进设置里改回来。
+auth:
+  enabled: true
+  # 接 SSO（雷池等）时填反代注入的可信身份请求头，例如 X-Remote-User。
+  # 填了之后该头指向的用户直接视为已登录；留空即用本地账号登录。
+  # ⚠️ 只有当 TuneSync 前面确实挂了会校验身份、并会清掉外部传入同名头的反代才能填，
+  # 否则任何人都能自己构造这个头直接冒充登录。也可在「全局设置 · 安全」里改。
+  proxy_header: ""
+
+# ── 本地音乐库 ────────────────────────────────────────
+# root 与飞牛音乐、Navidrome 的扫描目录必须是同一个目录，
+# 下载的文件直接落到 download_dir，两个库天然保持一致。
+library:
+  root: /music
+  download_dir: /music/Downloaded
+  rescan_interval_min: 10          # 增量扫描间隔（分钟）
+
+# ── 推送平台 ──────────────────────────────────────────
+# enabled=false 表示「配置留着但不参与同步」，UI 的「测试连接」仍然可用。
+# 密码留空即表示不修改；API 收到 "***" 或 "" 都不会清空已保存的口令。
+#
+# 凡是「和 TuneSync 同一台机器上」的服务，地址一律写 127.0.0.1：
+# 裸机运行时它就是对的；在容器里会自动换成宿主地址（见部署目录 .env 的
+# TUNESYNC_HOST）。服务在别的机器上才需要写真实 IP。
+targets:
+  navidrome:
+    enabled: true
+    url: "http://127.0.0.1:4533"
+    user: admin
+    password: ""                   # 建议在「推送平台」页面填写，不要提交到版本库
+  feiniu:
+    enabled: true
+    db_path: /feiniu-db/music.db   # 容器内挂载点，对应宿主机的
+                                   # ${TS_FEINIU_DB}/music.db
+    backup_db: true                # 首次写入前自动备份，保留最近 5 份
+    wait_timeout_sec: 600          # 等飞牛自身扫描入库的最长时间，超时则该歌单写入失败
+
+# ── 新建计划的默认偏好 ────────────────────────────────
+# UI「全局设置」页的「新建计划默认值」改的就是这里，会存进 kv 表并覆盖下面的默认值。
+preferences:
+  categories: [douyin]             # 预设场景，见 categories.yaml
+  custom_prompt: ""                # 自定义推送提示词：填写后按提示词生成，场景仅作兜底主题
+  count_per: 3                     # 每个场景生成几张歌单
+  push_mode: source_llm            # 推送方式：llm=LLM 生成 / source_llm=乐源拉取+LLM 筛选 / source_raw=乐源拉取不过 LLM
+  source_platforms: [all]          # 乐源拉取的来源平台；[all] 表示五个平台聚合
+
+# ── 乐源拉取 ──────────────────────────────────────────
+push:
+  candidate_pool: 40               # 每个平台从歌单广场取多少张候选，供 LLM 筛选或直接取前 N 张
+
+# ── LLM 歌单推荐 ──────────────────────────────────────
+# 任意 OpenAI 兼容的 /chat/completions 端点（DeepSeek / 通义 / Kimi / OpenAI / vLLM 等）。
+# api_key 建议只在部署环境填写；GET /api/settings 会把它掩码成 ***。
+llm:
+  base_url: ""                     # 如 https://api.deepseek.com/v1
+  api_key: ""
+  model: ""                        # 如 deepseek-chat
+  temperature: 0.8
+  tracks_per_playlist: 30          # 每张歌单生成的曲目数
+  select_pool: 40                  # 「乐源拉取 + LLM 筛选」时，一次送给模型过目的候选歌单上限
+
+# ── 下载 ──────────────────────────────────────────────
+# 默认值按「先多下下来」来定，宁可宽松也别把歌误杀：
+# 校验阈值压得很死的话，短曲 / 低码率音源会被整首判成无效音频。
+download:
+  concurrency: 5                   # 全局并发下载数；再高容易被音源限流反而更慢
+  min_duration_sec: 10             # 校验：时长下限（秒）。只拦切片和试听片段
+  quality: "320"                   # 首选音质。FLAC 覆盖率很低，当首选会让多数歌先失败一次再降级
+  quality_fallback: ["128", "96"]  # 音质降级链，逐级重试；96 兜底冷门音源
+  min_bytes: 300000                # 校验：文件体积下限（字节）。320kbps 一首歌基本都过
+
+# ── 刮削 ──────────────────────────────────────────────
+scraper:
+  # 元数据来源优先级，逐源搜索后按字段合并（谁先给就用谁）
+  # wy=网易云  tx=QQ音乐  kg=酷狗  kw=酷我  ap=Apple Music  mb=MusicBrainz 开放库
+  # 前四源是华语主力，ap 字段最全（专辑/流派/年份/封面一次到位）但华语要靠宽松匹配，
+  # 排在国内三源之后补手；mb 中文基本没有，放最后兜底欧美日韩（限速 1 req/s，别往前提）
+  order: [wy, tx, kg, kw, ap, mb]
+  embed_cover: true                # 封面内嵌 + 同目录 cover.jpg
+  save_lrc: true                   # 生成同名 .lrc
+  concurrency: 6                   # 手动刮削并发（上限 8）
+
+# ── 歌单命名 ──────────────────────────────────────────
+naming:
+  playlist: "{name}"               # 可用变量：{category} {name} {platform}
+                                   # LLM 生成的歌单名已是平台风格，默认不再加前缀
+
+# 任务 cron：分 时 日 月 周（也可写 6 段含秒）。
+# 星期编号沿用 APScheduler：0=周一 1=周二 … 6=周日；
+# 常见写法「7=周日」会自动归一成 0，但 Unix cron 的「0=周日」在这里是周一。
+
+# ── 音源健康 ──────────────────────────────────────────
+source_health:
+  probe_interval_min: 30           # 探活周期（分钟）
+  fail_threshold: 8                # 连续失败达到该次数熔断；公开音源偶发 503/限流很常见，阈值太低会把好源频繁熔断
+  probe_keyword: "周杰伦 晴天"       # 探活用的固定测试关键词
+
+# ── 音源 ──────────────────────────────────────────────
+# 这里只是初始化示例，实际音源在 UI「音源管理」里增删改，存进 SQLite。
+# cfg 是通用 http-api 模板：{kw}=搜索关键词  {id}=歌曲ID  {quality}=音质
+# list_path 为 "$" 表示搜索结果就是响应顶层数组；
+# quality_map 用于音质参数名换算（GD 音乐台的 flac 写作 999）。
+sources:
+  - name: GD音乐台
+    priority: 1
+    enabled: true
+    cfg:
+      search: "https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name={kw}&count={limit}&pages=1"
+      limit: 20
+      list_path: "$"
+      id_field: id
+      title_field: name
+      artist_field: artist
+      album_field: album
+      url: "https://music-api.gdstudio.xyz/api.php?types=url&source=netease&id={id}&br={quality}"
+      url_paths: ["url"]
+      quality_map: { flac: "999" }
+  - name: 酷我音乐
+    priority: 2
+    enabled: true
+    cfg:
+      search: "http://search.kuwo.cn/r.s?client=kt&all={kw}&pn=0&rn={limit}&ft=music&rformat=json&encoding=utf8&vipver=1&mobi=1&strategy=2012&cluster=0&uid=2574109560&ver=kwplayer_ar_8.5.4.2&vermerge=1"
+      limit: 20
+      list_path: "abslist"
+      id_field: MUSICRID          # 原值形如 MUSIC_228908，antiserver 的 rid 参数原样可用
+      title_field: NAME
+      artist_field: ARTIST
+      album_field: ALBUM
+      url: "http://antiserver.kuwo.cn/anti.s?type=convert_url3&br={quality}&rid={id}&response=url"
+      url_paths: ["url"]
+      quality_map: { flac: "2000kflac", "320": "320kmp3", "128": "128kmp3", "96": "128kmp3" }

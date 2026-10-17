@@ -1,0 +1,82 @@
+# TuneSync NAS 部署（自包含目录）
+#
+# 本目录（tunesync/deploy/）包含构建镜像所需的全部文件。
+# 先准备环境变量文件（可选，国内网络建议）：
+#   cp .env.example .env
+# 然后在本目录内启动（compose 会自动读取同目录的 .env）：
+#   docker compose up -d --build
+#
+# 关键点：飞牛音乐与 Navidrome 扫描的目录要和 TuneSync 的 library.root 指向同一个目录，
+# 下载的文件直接落进去，两个库天然保持一致。
+
+services:
+  tunesync:
+    build:
+      # 构建上下文就是本目录：app/ config/ frontend/ 等都由
+      # tools/pack-deploy.cmd 从开发目录同步到此处，整个文件夹可独立拷到 NAS。
+      context: .
+      dockerfile: Dockerfile
+      # 必须显式指定 stage。Dockerfile 里 test stage 排在最后（它 FROM runtime），
+      # 而 buildx 默认构建最后一个 stage——不写这一行的话 compose 会把跑 pytest
+      # 的镜像当服务器部署，容器起来就开始跑测试然后退出，被 restart 拉起、
+      # 再退出，表现为无限重启且 Web 端口永远连不上。
+      target: runtime
+      args:
+        # 默认走中国内地加速源（直连 docker.io / pypi.org 基本超时）。
+        # 想换源在 .env 里改，备选见 .env.example 注释。
+        REGISTRY: ${REGISTRY:-docker.1ms.run/library}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+    image: tunesync:latest
+    # 镜像只由本目录构建、从不从仓库拉取：否则 NAS 上本地没有 tunesync:latest 时
+    # compose 会先去 docker.io 拉一次，超时后才转构建，日志里白白多一段拉取报错。
+    pull_policy: never
+    container_name: tunesync
+    restart: unless-stopped
+    ports:
+      # 8066 不是随手选的：Chrome/Firefox 把 6665-6669 列进「不安全端口」黑名单（IRC），
+      # 浏览器会直接拒绝、报 ERR_UNSAFE_PORT，命令行却一切正常。
+      # 容器内固定用 8066，宿主机端口可用 .env 里的 TS_PORT 改。
+      - "${TS_PORT:-8066}:8066"      # TuneSync Web 管理界面端口
+    volumes:
+      # 注意路径：镜像里保留了 tunesync/ 这一层，配置在 /app/tunesync/config。
+      # 写成 /app/config 的话挂载点会盖不到真实配置文件，后端会退回内置默认值。
+      - ./config:/app/tunesync/config           # config.yaml + categories.yaml
+      # SQLite 状态库、日志、下载临时区、飞牛库备份
+      - ${TS_DATA_DIR:-./data}:/app/data
+      # 本地音乐库（飞牛音乐 / Navidrome 共用）。默认是飞牛的路径；
+      # 本机调试用 TS_MEDIA_DIR 覆盖，例如 TS_MEDIA_DIR=D:/media/music
+      - ${TS_MEDIA_DIR:-/vol1/media/music}:/music
+      # 飞牛音乐 music.db 所在目录。直写 database 是飞牛唯一的写入方式，
+      # 这行不能删。本机没有飞牛时把 TS_FEINIU_DB 指到任意可写目录。
+      - ${TS_FEINIU_DB:-/usr/local/apps/@appdata/trim.music/db}:/feiniu-db:rw
+      # 飞牛封面实体文件目录：歌单封面必须落在这里的 playlist 子目录，
+      # 飞牛 App 才显示（cover_guid 只是引用，实体在 track/album 目录它不去找）。
+      - ${TS_FEINIU_COVER:-/vol1/@appmeta/trim.music/cover}:/feiniu-cover:rw
+    environment:
+      - TZ=Asia/Shanghai
+      # 同机服务（Navidrome / 飞牛网关 / 音源）在 config.yaml 里一律写 127.0.0.1，
+      # 容器内会自动换成这个地址。只有当服务以另一个容器运行且不发布端口时，
+      # 才需要在这里填那个容器的服务名或 IP；默认留空即可。
+      - TUNESYNC_HOST=${TUNESYNC_HOST:-}
+    extra_hosts:
+      # 把 host.docker.internal 指向宿主机。Navidrome、飞牛网关、音源都跑在
+      # NAS 宿主机上时，容器里的 127.0.0.1 指不到它们，靠这条自动解析过去。
+      - "host.docker.internal:host-gateway"
+    # 镜像里没有 curl（slim 基础镜像 + 刻意不装 apt），用 Python 自己发请求。
+    # 写 curl 的话健康检查永远失败，compose 会一直显示 unhealthy。
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8066/api/health', timeout=4).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+# 直写飞牛 music.db 需要容器对 /feiniu-db 有写权限。
+# 镜像默认以 root 运行（music.db 归飞牛的 root 所有），所以不用额外处理。
+# 想收紧权限时：给宿主机该目录 chown 到容器用户，再在上面加 user: "1000:1000"。
+# 权限不足时在「目标库」页确认飞牛的 db_path 指向了正确的目录。
+#
+#   docker compose exec tunesync \
+#     python -c "from tunesync.app import core;core.init_db();\
+#       from tunesync.app.writers import FeiniuWriter;\
+#       print(FeiniuWriter(core.merged_targets()['feiniu']).schema_report())"

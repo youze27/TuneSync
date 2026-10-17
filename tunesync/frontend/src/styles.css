@@ -1,0 +1,187 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Helvetica Neue', Helvetica, 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', Arial, sans-serif;
+  background: #f4f6f9;
+  color: #303133;
+  font-size: 14px;
+}
+
+.page {
+  padding: 16px 20px 32px;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.page-subtitle {
+  color: #909399;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.ts-card {
+  border-radius: 8px;
+}
+
+.muted {
+  color: #909399;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', Consolas, 'Courier New', monospace;
+  font-size: 12px;
+}
+
+.break-all {
+  word-break: break-all;
+}
+
+.scroll-y {
+  overflow-y: auto;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.mb-12 {
+  margin-bottom: 12px;
+}
+
+.mt-12 {
+  margin-top: 12px;
+}
+
+.el-table .cell {
+  word-break: break-word;
+}
+
+/*
+ * 弹窗宽度由各页自己用 width 属性决定，这里只兜一个上限，
+ * 免得宽弹窗在窄一点的桌面屏上横向溢出（手机端的强制宽度在下面的断点里）。
+ */
+.el-dialog {
+  max-width: 96vw;
+}
+
+.empty-hint {
+  padding: 28px 16px;
+  text-align: center;
+  color: #909399;
+}
+
+.log-box {
+  height: 260px;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  background: #fafbfc;
+  padding: 8px 10px;
+}
+
+.log-line {
+  display: flex;
+  gap: 8px;
+  line-height: 1.9;
+  font-size: 12px;
+  border-bottom: 1px dashed #f0f2f5;
+}
+
+/* ───────────────────────────── 手机端 */
+
+/*
+ * 断点与 App.vue 的 matchMedia('(max-width: 768px)') 保持一致：
+ * 侧边栏在该宽度下被收进抽屉，两边必须同步，不然会出现「有抽屉没按钮」的空档。
+ */
+@media (max-width: 768px) {
+  .page {
+    padding: 12px 12px 24px;
+  }
+
+  .page-header {
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .page-title {
+    font-size: 16px;
+  }
+
+  .stat-grid {
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+  }
+
+  .log-box {
+    height: 180px;
+  }
+
+  /* 表格列多，Element Plus 自己会在容器内出横向滚动条，这里别去动 inner-wrapper 的 overflow，
+     改了会把表头和表体拆成两层滚动 */
+
+  /* 弹窗/抽屉 teleport 到 body，只能用全局选择器压宽度 */
+  .el-dialog {
+    width: 92vw !important;
+    max-width: 560px;
+  }
+
+  .el-dialog__body {
+    padding: 12px 16px;
+    max-height: 66vh;
+    overflow-y: auto;
+  }
+
+  /* label-position="left" 时标签和输入框并排，窄屏下输入框会被 label-width 挤没，
+     改成标签独占一行 */
+  .el-form--label-left .el-form-item__label,
+  .el-form--label-left .el-form-item__content {
+    flex: 1 1 100%;
+    text-align: left;
+  }
+
+  .el-drawer__body {
+    padding: 0;
+  }
+
+  .el-message-box {
+    width: 88vw !important;
+    max-width: 420px;
+  }
+
+  .el-popper {
+    max-width: 88vw;
+  }
+}

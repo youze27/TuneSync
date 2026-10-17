@@ -1,0 +1,7 @@
+# 可选增强依赖（不影响主流程，缺失时功能自动降级）
+#
+# 繁简转换：装上后「匹配算法」的归一化会额外做一次 t2s 转换，
+# 显著提升繁体歌名与简体库之间的命中率；不装则只做字符级归一。
+# 安装：pip install -r requirements-optional.txt
+
+opencc-python-reimplemented>=0.1.7   # 繁→简，提升本地库匹配命中率

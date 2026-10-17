@@ -1,0 +1,3 @@
+# Windows batch files: cmd decodes them with the OEM code page, so any
+# non-ASCII byte (including a UTF-8 BOM) can corrupt parsing.
+*.cmd text eol=crlf working-tree-encoding=latin1

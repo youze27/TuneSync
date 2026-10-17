@@ -1,0 +1,8 @@
+# 测试依赖（生产镜像不需要）
+# 在 tunesync/deploy/ 目录内：
+#   docker build --target test -t tunesync:test .
+#   docker run --rm tunesync:test
+-r requirements.txt
+pytest>=8.3
+# starlette.testclient / fastapi.testclient 的硬依赖：缺它整个 test_api.py 收集失败。
+httpx>=0.28
