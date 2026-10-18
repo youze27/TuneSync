@@ -402,33 +402,189 @@ targets:
 
 ## 2.6 Web 管理界面
 
-| 页面 | 内容 |
+> **重写说明**：本节原先只列了 6 个页面和一份简略接口表，与现在的实现差得很远
+> （页面已扩到 12 个，多出歌单广场 / 歌单管理 / 本地乐库 / 刮削设置 / 登录，
+> 接口也多了 50 余个）。以下按当前代码重写，页面清单以 `router.js` 为准、
+> 接口清单以 `api.js` + `app/api.py` 的路由为准。
+
+### 2.6.1 技术栈与目录结构
+
+Vue 3（`<script setup>`）+ Vite 5 + Element Plus + axios + vue-router 4，**不引入 Pinia**：
+
+```
+frontend/src/
+├── main.js              # 挂载 Element Plus、注册图标、启动 store.boot() 与 WS
+├── App.vue              # 侧边菜单 + 顶栏（运行标记 / WS 状态 / 账号），登录页不带布局
+├── router.js            # 12 条路由 + 登录守卫
+├── store.js             # 轻量全局响应式状态（reactive + computed），见 2.6.4
+├── api.js               # 全部 REST 封装 + 统一错误处理
+├── ws.js                # 进度通道：指数退避重连、订阅分发
+├── utils.js             # 时间/体积/时长格式化
+├── styles.css           # 全局样式与工具类（.muted / .mono / .mb-12 等）
+├── components/          # CronPicker / StatCard / HealthTag / PlaylistCard / SourceForm
+└── pages/               # 12 个页面，与路由一一对应
+```
+
+- **构建产物直接落到后端**：`vite.config.js` 的 `outDir: '../app/static'`，
+  FastAPI 用 `StaticFiles` 挂 `/assets` 并托管 `index.html`，前后端同源、无跨域配置。
+- **手动分包**：`vendor`（vue/router）、`element`、`http`（axios）三个 chunk，
+  避免全打进一个 1MB+ 的包。
+- **开发代理**：`pnpm dev` 起在 5273，把 `/api` 与 `/ws` 代理到 `127.0.0.1:8066`；
+  生产构建不需要代理。
+- **路由懒加载**：所有页面都是 `() => import(...)`，首页不加载其余 11 个页面的代码。
+- **`index.html` 强制 `Cache-Control: no-cache`**（后端 `_index_response`）：
+  bundle 文件名带 hash，若 `index.html` 被缓存，浏览器会去请求已不存在的旧 bundle，
+  页面永远停在旧版本。
+- **响应式**：`App.vue` 用 `matchMedia('(max-width: 768px)')` 切换布局，
+  宽屏是固定侧边栏，窄屏收进 `el-drawer`；监听 `change` 事件，拉宽时自动关抽屉。
+- **仪表盘 keep-alive**：`<keep-alive :include="['Dashboard']">`，
+  在推送计划页之间来回切时进度面板不丢。
+
+### 2.6.2 页面清单（12 个）
+
+| 路由 | 页面 | 职责与主要操作 |
+|---|---|---|
+| `/` | 仪表盘 | 运行总览。运行队列（唯一清单）、实时进度条 + 复用/下载/跳过计数、歌曲推送/阶段日志双 Tab、最近一次运行概况（来源×场景聚合 + 失败清单）、音源健康卡、4 个统计卡；操作：立即扫描本地库、全部检测音源、查看完整历史 |
+| `/tasks` | 推送计划 | 计划任务列表（名称/场景/数量/来源/频率/启用/最近与下次运行）；行内立即执行、编辑、删除、启用开关；展开行看分类明细、来源、场景推送模式、自定义提示词、Cron |
+| `/push-config` | 新建计划 | 单条计划的表单：基本信息（名称、CronPicker 频率 + 人话描述）、推送场景（49 个分类按分组平铺，分组内全选/反选）、推送偏好（AI 生成 / 乐源拉取、单独或合并推送、每歌单歌曲数、每场景歌单数、来源平台、AI 筛选、搜索关键词、自定义提示词）；底部 sticky 底栏：保存 / 保存并立即执行 |
+| `/sources` | 音源管理 | 音源表格（优先级整列拖拽排序、启用、健康状态、失败次数、成功率、最近检测、最近错误 tooltip、配置预览 tooltip）；新增/编辑弹窗（HTTP 模板 / LX 音源脚本两种类型）、粘贴脚本导入、批量导入多文件多链接；操作：单个/全部检测 |
+| `/playlists` | 歌单广场 | 网易云 / QQ / 酷狗 / 酷我 / 咪咕 五平台 + 聚合模式的游客直连浏览；分类下拉、关键词搜索（仅 all/kg/kw/mg 支持，分类下拉即预设关键词）、歌单直达（链接或纯 ID）、封面网格 + 分页、详情弹窗看曲目表；操作：解析预览、推送歌单（导入并推送到已启用目标） |
+| `/playlist-manager` | 歌单管理 | 管理目标端已有歌单：目标切换（飞牛 / Navidrome，未配置打标签）、按歌单名筛选、按生成时间/曲目数排序、多选批量删除、分页；「定时清理老旧歌单」弹窗（保留天数 + 作用范围 + 定时执行开关，默认先 dry_run 预演，确认后才真删） |
+| `/library` | 本地乐库 | 关键词 + 歌手/流派/风格/年份/格式 五维筛选（下拉带计数）、歌曲表格（多选保留、建单）、底部建单栏（用选中的 N 首建歌单写入已启用目标）；「重复歌曲去重」弹窗（完全相同 / 同名不同版本只读、重复组可逐条标记豁免、进度条、预演明细）；未刮削缺口提示；操作：重新扫描音乐库 |
+| `/targets` | 推送平台 | Navidrome 与飞牛音乐各自的启用开关、连接配置、测试连接（带界面当前未保存的值）；飞牛侧含 music.db 路径、校验表结构、写入前备份开关、修复歌单封面；底部「music.db 结构校验」卡展示 schema 指纹比对结果、journal_mode、缺失项告警、按表折叠列出所有列 |
+| `/scrape` | 刮削设置 | 顶部统计条（已刮削覆盖率、缺流派/年份/封面/歌词、整体进度）；手动刮削卡（范围：只补缺失 / 全库重来 / 指定数量 + 进度 + 成功失败明细）；刮削参数卡（七个数据源按优先级勾选、内嵌封面、生成歌词、并发数）；定时自动刮削卡（cron）；AI 元数据补全卡（范围、数量上限、进度与失败清单）。**开跑前强制先保存参数**，保证所见即所跑 |
+| `/runs` | 运行历史 | 左列表（时间/状态/任务名/#id/耗时/歌单数/推送成功率）右详情（5 个 StatCard：歌单数/成功歌曲/本地复用/已下载/已跳过、运行中断 alert、错误清单、按歌单的折叠面板内嵌 PlaylistCard）；操作：全部展开/收起、封面点击放大 |
+| `/settings` | 全局设置 | LLM 卡（接口地址/Key/模型/温度/每张曲目数/候选送审上限/测试连通）、访问安全卡（登录校验开关、SSO 身份头、已有账号数）、歌单命名卡（模板 + 可用变量 + 命名预览）、下载设置卡（并发/首选音质/降级链/时长下限/体积下限）、配置导入导出卡 |
+| `/login` | 登录 | 首次进入引导创建管理员账号，之后是登录；SSO 待认证时替代表单提示走统一身份入口；支持 `?redirect=` 回跳与 `?username=` 预填 |
+
+**共用组件**：
+
+| 组件 | 作用 |
 |---|---|
-| 仪表盘 | 最近一次推送概况（各场景歌单数/失败原因）、当前运行中任务的实时进度条、音源健康状态卡 |
-| 推送偏好 | 49 场景多选（抖音热歌置顶，按 活动/心情/风格 分组展示）+ 自定义推送提示词 + 每场景歌单数 |
-| 计划任务 | 频率表单（每天/X天/每周几/每月几号 + HH:MM），立即执行按钮 |
-| 音源管理 | 增删音源、优先级拖拽排序、手动「检测可用性」、健康状态/最近错误展示 |
-| 目标库 | Navidrome / 飞牛音乐连接配置 + 测试连接 + 歌单命名模板；飞牛侧含 schema 校验与备份状态展示 |
-| 运行历史 | fetch_run 列表 → 详情（歌单明细、每曲状态：本地复用/下载/跳过+原因） |
+| `CronPicker.vue` | 频率选择器。每天 / 每 N 天 / 每周几 / 每月几号（限 1–28 避免短月跳过）+ HH:MM，实时显示 cron 表达式。**cron 字段顺序与星期编号约定由后端 `GET /api/settings` 的 `cron` 节下发**，前端不硬编码第二份（`store.js` 的 `parseWeekdayMap` 解析后端文案） |
+| `StatCard.vue` | 统计数字卡（标题 + 数值 + 说明），仪表盘与运行详情共用 |
+| `HealthTag.vue` | 音源健康徽标，healthy / degraded / down 三态配色 |
+| `PlaylistCard.vue` | 歌单卡：封面（懒加载 + 点击放大 + 占位兜底）+ 平台/场景/状态标签 + 曲目/复用/下载/跳过计数 + 错误提示 |
+| `SourceForm.vue` | 音源配置表单（HTTP 模板与 LX 脚本两种类型共用外壳） |
 
-REST API（前缀 `/api`，FastAPI 自动文档 `/docs`）：
+### 2.6.3 接口清单
+
+后端 FastAPI 自动文档在 `/docs`，前缀 `/api`。`api.py` 里每个路由都打了中文 `tags`，
+在 `/docs` 侧栏按业务分组显示。以下按分组列出（`GET/PUT /settings` 之类为简写）：
 
 ```
-GET/PUT  /settings                 # 推送偏好、命名模板等全局配置
-CRUD     /tasks                    # 计划任务
-POST     /tasks/{id}/run           # 立即执行
-GET      /runs, /runs/latest, /runs/{id}
-CRUD     /sources, POST /sources/{id}/check
-GET/PUT   /targets                 # navidrome / feiniu 连接配置
-POST     /targets/{type}/test
-POST     /library/rescan           # 手动重建本地索引
-GET      /health/sources           # 音源健康
-WS       /ws/progress              # 实时进度推送
+登录        GET  /auth/state                POST /auth/setup  /auth/login  /auth/logout  /auth/password
+推送场景     GET  /categories
+设置        GET/PUT /settings               POST /settings/test-llm
+            GET  /config/export            POST /config/import
+计划任务     GET/POST /tasks                PUT/DELETE /tasks/{id}
+            POST /tasks/{id}/run           POST /fetch-now
+运行历史     GET  /runs  /runs/latest  /runs/{id}
+            GET  /runs/queue               # 队列快照，WS 断了也能兜底
+            GET  /runs/logs                # 留档日志，半路打开页面时补齐进度
+音源        GET/POST /sources              PUT/DELETE /sources/{id}
+            POST /sources/{id}/check       POST /sources/check-all
+            POST /sources/quick-lx         # 落雪脚本单条导入（沙箱预检）
+            POST /sources/quick-lx-batch   # 批量导入，≤20 条
+            GET  /health/sources
+歌单导入     GET  /playlist/platforms  /playlist/categories  /playlist/square
+            POST /playlist/detail  /playlist/import        # 202，立即返回后台跑
+            GET  /playlist/import/running
+歌单管理     GET  /playlists/targets  /playlists/{target}
+            DELETE /playlists/{target}/{pid}
+            POST /playlists/cleanup
+推送平台     GET/PUT /targets               POST /targets/{kind}/test
+            GET  /targets/feiniu/schema    POST /targets/feiniu/fix-covers
+本地库       POST /library/rescan           GET  /library
+            GET  /library/duplicates       POST /library/dedupe  /library/dedupe/status
+本地乐库     GET  /localfiles               GET  /localfiles/facets
+            POST /localfiles/playlist
+刮削        GET  /scrape/stats  /scrape/candidates  /scrape/status
+            POST /scrape/run  /scrape/ai-run  /scrape/ai/status
+系统        GET  /status                    GET  /health
+WS        /ws/progress（另有 /api/ws/progress 别名）
 ```
+
+**约定与坑**：
+
+- **测试连接必须带草稿**：`testTarget(kind, draft)` 带上界面上未保存的输入才测「你填的地址」，
+  否则测的是已存的旧值，报错会和屏幕上的对不上；密码栏的 `***` 由后端还原成已存真值。
+- **保存与测试的顺序**：LLM 测试、飞牛 schema 校验前都先 PUT 当前值，避免测旧配置。
+- **统一错误出口**：`api.js` 的 axios 实例把后端 `{"detail": "中文错误"}` 统一抽成
+  `errText(e)`，配合 `toastError(e, msg)` 一行弹窗，页面里不再重复写 try/catch 弹窗；
+  FastAPI 参数校验的数组型 detail 也会被拼成 `字段: 原因` 的可读文本。
+- **401 统一广播**：响应拦截器看到 401（登录接口除外）就派发 `ts:unauthorized` 事件，
+  由 `App.vue` 重置登录态并跳登录页。
+- **超时分档**：LLM 测试 130s、去重 600s、建单 180s、歌单详情 90s、广场列表 45s，
+  都在 `api.js` 里按调用点单独放宽（默认 30s）。
+- **契约测试**：`frontend/tests/contract.mjs` 把 `src/api.js` 原样加载（只替掉 DOM 依赖与
+  baseURL），用前端自己的请求函数逐个打到跑着的后端上。端点不存在、方法不对、字段名不对、
+  掩码语义不对，都会在这一层炸出来。运行：`tunesync\frontend\tests\run-contract.cmd`。
+
+### 2.6.4 状态管理：store.js
+
+刻意不引 Pinia，一个 `reactive` 对象 + 若干 `computed` 就够：
+
+| 成员 | 说明 |
+|---|---|
+| `state` | 全局响应式状态：`categories`/`status`/`library`/`lastRunDetail`/`tasks`/`settings`/`runs`/`liveId`/`queue` |
+| `runs` + `runSlot(runId)` | **进度按 run_id 分片存**，每片 `{runId, taskId, taskName, active, startedAt, progress, tracks, totals, ended, expected}`，谁也不覆盖谁 |
+| `liveRun` / `anyRunning` | 聚焦展示的那一片 / 有没有任务正在跑（不含排队），顶栏「运行中」标记看它 |
+| `loadRuns()` | 页面刷新后 `runs` 是空的，从 `GET /runs` 补最近 20 条；**用权威状态覆盖分片**：`active = status==='running'`、`ended = JSON.parse(summary)` |
+| `hydrateRunLogs(slot)` | 只在分片空白时拉 `GET /runs/logs` 补齐留档日志（WS 只推给当时在线的页面，半路打开/刷新只能靠它） |
+| `loadQueue()` / `state.queue` | 队列快照，`{active, waiting, depth}`，WS 断了也能兜底 |
+| `loadAuth(force)` / `auth` | 登录态。并发调用共享同一个 in-flight 请求，失败后清缓存允许重试 |
+| `ensureSettings(force)` | 全局设置缓存，供 CronPicker、偏好页、新建计划默认值共用 |
+| `preferences` / `cronHelp` / `weekdayLabels` | 服务端返回的偏好、cron 编号约定、由后端文案解析出的星期名 |
+| `pushModeOf` / `splitPushMode` | 界面上的「歌单来源 + AI 筛选」与后端三档 `push_mode`（`llm` / `source_llm` / `source_raw`）互转 |
+| `MAX_TRACKS` / `MAX_PROGRESS` | 5000 / 8000 条上限，防一次推送几千条消息把内存跑飞 |
+
+`boot()` 的顺序有讲究：先问鉴权（没登录时后面所有接口都会 401，白拉不如直接去登录页），
+再拉场景字典，`ensureSettings()` 失败不阻塞页面渲染。
+
+**哪些页面走 store**：Dashboard、Tasks、Settings、Login 用 store 的流程函数；
+Sources / Playlists / Library / Targets / Scrape / Runs / PlaylistManager
+是页面内直接调 `api.js`，不走 store 缓存——这些页面的数据一次性用完，没有跨页共享需求。
+
+### 2.6.5 实时进度：ws.js + WS 事件
+
+**连接**：`ws://<当前域名>/ws/progress`（https 下自动切 `wss:`）。
+断线后指数退避重连 `1s → 2s → 4s → 8s → 封顶 15s`，退避秒数实时显示在顶栏。
+`wsState`（status/retry/lastError/hello）是 `reactive`，顶栏据此显示
+「进度通道已连接 / 正在连接 / 断开，Ns 后重试」，并给一个手动「重连」按钮。
+
+**重连后必须补数据**（`ws.js` 的 `everOpened` + store 的 `resync` 分支）：
+断线期间后端发生的 `run_start` / `run_end` 一条都收不到，前端分片会永远停在半途
+——已结束的运行还挂着「运行中」标签。所以**首次**连接只置状态，**重连**成功时额外
+派发一条 `{type:'resync'}`，store 收到后 `loadRuns() + loadQueue()` 用 REST 拉回权威状态。
+
+**事件协议**（后端 `emit()` 发出，前端 `handleWsMessage` 分发）：
+
+| type | 载荷要点 | 前端处理 |
+|---|---|---|
+| `hello` | `message` | 写入 `wsState.hello`，显示在顶栏 tooltip |
+| `resync` | — | **前端自造**，触发 `loadRuns() + loadQueue()` |
+| `queue` | `action`(wait/start/end)、`guard`、`label`、`since`、`active`/`waiting`/`depth` | 覆盖 `state.queue`。**不带 run_id**，只能更新队列本身，进度面板另按 run_start/run_end 走 |
+| `run_start` | `run_id`、`task_id`、`task` | 新建分片并重置计数；只有当前没在展示或展示的那片已结束才自动切前台，否则排队里第二个任务会抢走第一个的进度 |
+| `run_expected` | `run_id`、`add` | 累加进度条**分母**（每张歌单开跑时报上曲目数）。总量随场景拉取逐步变大，百分比会小幅回跳——这是诚实进度 |
+| `progress` | `run_id`、`stage`、`detail`、`run_playlist_id` | 追加阶段日志（`stageLabel` 映射成「生成歌单/刮削/写入歌单」等中文），同时置 `active=true` |
+| `track` | `run_id`、`run_playlist_id`、`title`、`artist`、`status`、`source`、`file_path`、`error` | 累加 `totals`（local/downloaded/skipped）并追加曲目明细 |
+| `run_end` | `run_id`、`summary` | 置 `active=false`、写入 `ended`，追加「本次运行结束」 |
+| `source-health` | `source`、`health` | 就地更新 `state.status.sources` 里的健康字段，各页签即时变色 |
+| `scrape_progress` | `done`、`total`、`ok`、`failed` | 刮削页轮询 `GET /scrape/status` 之外的 WS 进度 |
+| `dedupe_progress` | `dry_run`、`done`、`total` | 去重弹窗的进度条 |
+
+**鉴权**：HTTP 中间件管不到 WebSocket，`/ws/progress` 入口自己再校验一次，
+开了登录校验时未登录直接 `close(4401)`——否则进度流（歌名、文件路径）仍对匿名连接敞开。
+
+**推送是全局串行的**（`_enter_slot/_leave_slot`，见 2.2.4 与 3.6）：
+同一时刻只可能有一个 run 在跑，仪表盘的「运行队列」因此就是唯一一份清单，
+不需要再按 run_id 并排展示历史运行——并排那份在串行下永远只有一行，
+且容器重建丢掉 `run_end` 时会一直显示假状态，已删除（见 3.15）。
 
 ## 2.7 配置文件（config.yaml 摘要）
 
-> **修订**：端口为 8066；`scraper.order` 已扩展为六源 `[wy,tx,kg,kw,ap,mb]`；
+> **修订**：端口为 8066；`scraper.order` 已扩展为七源 `[wy,tx,kg,kw,ap,dg,mb]`（新增 Discogs）；
 > `download` 增加 `retry/track_timeout/stall_timeout`，`scraper` 增加
 > `auto_scrape/manual_scope/manual_limit/preview_limit`；权威默认值见
 > `tunesync/config/config.yaml`（带完整注释）与本文第三部分。
@@ -701,7 +857,7 @@ NAS：  docker compose up -d --build   # 自包含构建，pull_policy: never
 - 容错：整批请求失败只逐首记错误继续下一批；模型漏答/答错编号的单首记「没有返回该曲目的
   元数据」；写标签失败单首记 error——一首歌出错绝不放大到整批。
 - 限速：批间间隔 `60/rpm` 秒（默认 rpm=10），批量大小取 `llm.ai_batch`（默认 20）。
-  只补缺失字段：库里已有的值原样带上回写（`cover` 也回传），不会冲掉线上六源刮到的好数据。
+  只补缺失字段：库里已有的值原样带上回写（`cover` 也回传），不会冲掉线上多源刮到的好数据。
 - 前端在刮削页右列新增「AI 元数据补全」卡片：范围/上限/确认框/进度条/失败清单，进页面先
   poll 一次状态（容器重启后接上正在跑的任务）。
 
