@@ -238,8 +238,8 @@
             </el-form-item>
 
             <el-form-item label="并发数">
-              <el-input-number v-model="form.concurrency" :min="1" :max="8" controls-position="right" />
-              <div class="muted tip">同时刮几个文件。NAS 上建议 2–4，太多容易把磁盘和网络打满</div>
+              <el-input-number v-model="form.concurrency" :min="1" :max="16" controls-position="right" />
+              <div class="muted tip">同时刮几个文件。刮削几乎全是网络请求，8–12 明显更快；磁盘太慢或音源限流再降</div>
             </el-form-item>
           </el-form>
         </el-card>
@@ -406,7 +406,7 @@ const form = reactive({
   order: [...DEFAULT_ORDER],
   embed_cover: true,
   save_lrc: true,
-  concurrency: 6,
+  concurrency: 8,
 })
 
 /** 定时自动刮削：嵌套在 scraper.auto_scrape 里原样透传给后端。 */
@@ -421,7 +421,7 @@ function fillForm(s = {}) {
   form.order = picked.length ? picked : [...DEFAULT_ORDER]
   form.embed_cover = sc.embed_cover ?? true
   form.save_lrc = sc.save_lrc ?? true
-  form.concurrency = sc.concurrency ?? 6
+  form.concurrency = sc.concurrency ?? 8
   const as = sc.auto_scrape || {}
   auto.enabled = !!as.enabled
   auto.cron = as.cron || '0 4 * * *'

@@ -465,6 +465,41 @@ class TestScrapeIntegrity:
         assert not st["running"] and st["ended_at"]
         assert st["logs"] and "没有待刮削" in st["logs"][0]["name"]
 
+    def test_queue_wait_not_counted_as_timeout(self, library, monkeypatch):
+        """排队等待不计入单首超时：并发 1 时第 2 首排队 1.5s 不能被 1s 超时线误杀。
+
+        回归 9411 首只剩 75 首成功的 bug——超时起点曾是提交时刻，整个
+        等待队列还没轮到执行就被批量判「刮削超时」跳过。
+        """
+        conn = core.db()
+        for p in ("q1", "q2"):
+            conn.execute(
+                "INSERT INTO local_file(path,title,artist,norm_key,mtime,scraped_at,"
+                "genre,year,cover,lyrics) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (p, p, "a", "k", 1.0, "", "", 0, "", ""))
+        conn.commit()
+
+        def fake_num(section, key, default=None, cast=int):
+            vals = {("scraper", "concurrency"): 1,
+                    ("scraper", "track_timeout"): 1,
+                    ("scraper", "stall_timeout"): 600}
+            return cast(vals.get((section, key), default))
+
+        monkeypatch.setattr(resolver, "_num", fake_num)
+
+        from tunesync.app import scraper
+
+        def slow_scrape(path, meta, sid=None):
+            time.sleep(1.5)
+            return {"tags": True, "cover": False, "lrc": False, "errors": [],
+                    "meta": {}, "hits": {}, "logs": [], "source": "tx"}
+
+        monkeypatch.setattr(scraper, "scrape", slow_scrape)
+
+        out = resolver.scrape_files(scope="missing")
+        assert out["ok"] == 2
+        assert out["failed"] == 0
+
     def test_scrape_bg_failure_recorded(self, library, monkeypatch):
         """后台线程崩了也要把原因写进 errors/logs，明细才有的看。"""
         def boom(*a, **k):

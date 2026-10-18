@@ -755,11 +755,36 @@ NAS：  docker compose up -d --build   # 自包含构建，pull_policy: never
   全空才记「所有数据源都没有歌词」。华语流派/年份的剩余大头由上一轮的
   AI 元数据补全兜底。
 
-### 稳定性确认（无需改码）
+### 稳定性修复：排队等待被误判超时（9411 首只成 75 首的根因）
 
-`resolver.scrape_files` 已具备全套机制：并发 worker（`scraper.concurrency`，
-默认上限 8）、单首超时 `track_timeout`（180s）记失败跳过、停滞看门狗
-`stall_timeout`（600s）整体卡死时终止剩余并收尾、`_scrape_one` 异常全收敛、
-每首完成即 emit `scrape_progress`（进度条 1.5s 轮询 + WS 实时）。前端刮削范围
-说明文案同步标注这些行为。
+第 14 轮上线后实测「全量刮 9411 首 → 成功 75 / 失败 9336、其中 9300 首
+『刮削超时（单首超过 180s）』」。逐项排查后确认**不是源的问题，是代码 bug**：
+
+1. **排队误杀（致命）**：`scrape_files` 的单首超时起点是**提交进线程池的时刻**
+   （`started = {f: time.time() for f in futs}`）。9411 首一次性提交到 6 worker
+   的队列里，后面九千多首在队列中还没开始执行就已经越过 180s 线，被批量记
+   「超时」跳过——跑完只剩最初 75 首真实成功的。修复：新增 `_timed()` 包装，
+   **worker 真正开始执行时**才在 `run_start[path]` 打点（带锁），超时判定改看
+   这个时间戳；排队时长不计入，任务结束即从表里移除。
+2. **短路条件失效（性能）**：`merge_sources` 的提前收工条件是
+   `all(out[k] for k in FIELDS)`，而 `style` 只有 Discogs 提供、QQ/Apple 都不给，
+   所以每首必然跑完全部 7 源才收工——实测 26s/首（对比 Whitney Houston 4.6s），
+   9411 首要 8 小时以上。修复：收工条件改为必齐 `album/genre/year/cover`，
+   `style` 退化为 Discogs 的加分字段随缘补上。
+3. **并发上限**：`max_workers` 上限 8 → 16，默认 `scraper.concurrency` 6 → 8，
+   前端并发输入框上限同步放宽到 16（刮削几乎全是网络请求，NAS 磁盘不是瓶颈，
+   沿用下载那个「2–4 保守值」是误判）。
+4. 回归测试 `test_queue_wait_not_counted_as_timeout`：并发 1 + 超时 1s + 每首
+   耗时 1.5s 的两首歌，必须 2 首全成功（旧逻辑会把第 2 首误杀）。
+
+**源本身已验证健康**：容器内实测网易云/QQ/iTunes/Discogs/LRCLIB/MusicBrainz
+六家全部连通且响应 1–2s；许茹芸《独角戏》、汪苏泷《放不下》、Whitney Houston
+《Call You Tonight》都能一次命中 album+genre+year+cover+歌词。
+
+### 稳定性机制现状
+
+并发 worker（`scraper.concurrency`，上限 16）、单首超时 `track_timeout`（180s，
+只计真正执行时间）、停滞看门狗 `stall_timeout`（600s）卡死时终止剩余并收尾、
+`_scrape_one` 异常全收敛、每首完成即 emit `scrape_progress`（进度条 1.5s 轮询 +
+WS 实时）。
 

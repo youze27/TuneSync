@@ -1082,8 +1082,9 @@ def scrape_files(scope="missing", limit=0):
     全自动，不支持挑选子集——点开始就按「范围 + 上限」整批跑。
 
     稳定机制（应对几千首的大库）：
-    - 并发 worker（scraper.concurrency，默认 6 上限 8）；
-    - 单首超时 track_timeout（默认 180s）：超时的歌记失败跳过，不拖住整轮；
+    - 并发 worker（scraper.concurrency，默认 6 上限 16）；
+    - 单首超时 track_timeout（默认 180s）：只对「真正开始执行」的任务计时，
+      排队等待不算——大库几千首排队时按提交时刻判超时会把整个队列误杀；
     - 停滞看门狗 stall_timeout（默认 600s）：长时间没有任何一首完成，
       判定卡死，剩余全部记超时失败并结束，前端不会永远转圈；
     - 每首的异常全部收敛成失败记录（见 _scrape_one），不会整轮崩掉。
@@ -1108,6 +1109,18 @@ def scrape_files(scope="missing", limit=0):
     track_timeout = max(30, _num("scraper", "track_timeout", 180))
     stall_timeout = max(track_timeout, _num("scraper", "stall_timeout", 600))
     aborted = False
+    run_start = {}          # row path -> worker 真正开始执行的时刻
+    run_start_lock = threading.Lock()
+
+    def _timed(row):
+        """包装 _scrape_one：进入 worker 时才打超时起点，排队时间不计入。"""
+        with run_start_lock:
+            run_start[row["path"]] = time.time()
+        try:
+            return _scrape_one(row)
+        finally:
+            with run_start_lock:
+                run_start.pop(row["path"], None)
 
     def _record(row, err, info):
         """统一记账：成功/失败计数、明细日志、进度事件、共享状态。"""
@@ -1130,10 +1143,10 @@ def scrape_files(scope="missing", limit=0):
               "fields": info["fields"], "source": info["source"]})
         _set_scrape(done=ok + len(failed), ok=ok, failed=len(failed), logs=logs[-300:])
 
-    pool = ThreadPoolExecutor(max_workers=min(_num("scraper", "concurrency", 4), 8))
+    # 上限 16：外网 API 请求是瓶颈，NAS 磁盘 IO 压力小，适度提并发能显著缩短全库耗时
+    pool = ThreadPoolExecutor(max_workers=min(_num("scraper", "concurrency", 4), 16))
     try:
-        futs = {pool.submit(_scrape_one, r): r for r in rows}
-        started = {f: time.time() for f in futs}
+        futs = {pool.submit(_timed, r): r for r in rows}
         pending = set(futs)
         last_beat = time.time()
         while pending:
@@ -1152,16 +1165,21 @@ def scrape_files(scope="missing", limit=0):
                                       "artist": row["artist"] or "",
                                       "fields": [], "source": "", "logs": []})
                     _record(row, err, info)
-                elif time.time() - started[f] > track_timeout:
-                    # 单首超时：线程杀不掉，记失败并放弃等待（后台线程跑完就自然消亡，
-                    # 其网络请求都有 TIMEOUT，不会真挂一辈子）
-                    pending.discard(f)
-                    progressed = True
-                    _record(row, f"刮削超时（单首超过 {track_timeout}s）",
-                            {"path": row["path"],
-                             "title": row["title"] or os.path.basename(row["path"]),
-                             "artist": row["artist"] or "",
-                             "fields": [], "source": "", "logs": []})
+                else:
+                    # 单首超时只看「真正在跑」的任务：_timed 开始执行时才打点。
+                    # 大库几千首排队时，没开始跑的任务绝不能按提交时刻判超时——
+                    # 那会把整个等待队列误杀（历史上 9411 首只剩 75 首成功的根因）
+                    t0 = run_start.get(row["path"])
+                    if t0 and time.time() - t0 > track_timeout:
+                        # 线程杀不掉，记失败并放弃等待（后台线程跑完就自然消亡，
+                        # 其网络请求都有 TIMEOUT，不会真挂一辈子）
+                        pending.discard(f)
+                        progressed = True
+                        _record(row, f"刮削超时（单首超过 {track_timeout}s）",
+                                {"path": row["path"],
+                                 "title": row["title"] or os.path.basename(row["path"]),
+                                 "artist": row["artist"] or "",
+                                 "fields": [], "source": "", "logs": []})
             if progressed:
                 last_beat = time.time()
             elif time.time() - last_beat > stall_timeout:

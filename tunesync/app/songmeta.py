@@ -755,7 +755,9 @@ def merge_sources(title, artist, order=None, want_lrc=True, log=None):
                 out["hits"][k] = plat
         out["logs"].append(f"{plat} 命中「{cand.get('title')} - {cand.get('artist')}」"
                            f" → {'/'.join(got) if got else '无新字段'}")
-        if all(out[k] for k in FIELDS):
+        # style 不在必齐清单里：QQ/苹果都不提供，留着它每首都会跑完全部 7 源，
+        # 大库场景等于白翻 3 倍请求；它作为 Discogs 的加分字段随缘补上即可
+        if all(out[k] for k in ("album", "genre", "year", "cover")):
             break
 
     if want_lrc and not out["lrc"]:

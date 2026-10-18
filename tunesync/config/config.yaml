@@ -95,7 +95,7 @@ scraper:
   order: [wy, tx, kg, kw, ap, dg, mb]
   embed_cover: true                # 封面内嵌 + 同目录 cover.jpg
   save_lrc: true                   # 生成同名 .lrc
-  concurrency: 6                   # 手动刮削并发（上限 8）
+  concurrency: 8                   # 手动刮削并发（上限 16）；纯网络 IO，8–12 能明显缩短全库耗时
   # 歌词链独立于 order：命中源的平台 lrc 接口 → LRCLIB（免 Key）→ lyrics.ovh（免 Key）
 
 # ── 歌单命名 ──────────────────────────────────────────
