@@ -847,6 +847,138 @@ def _set_scrape(**kw):
         _scrape_state.update(kw)
 
 
+# ── AI 批量刮削：LLM 补年份/流派/风格 ────────────────────────
+# 与在线刮削（六源搜索）互补：线上源拿不到的年份/流派交给模型批量补。
+_ai_lock = threading.Lock()
+_ai_state = {"running": False, "done": 0, "total": 0, "ok": 0, "failed": 0,
+             "ended_at": None, "errors": [], "logs": []}
+
+
+def ai_scrape_state():
+    with _ai_lock:
+        return {**_ai_state, "errors": list(_ai_state["errors"]),
+                "logs": list(_ai_state["logs"])}
+
+
+def _set_ai(**kw):
+    with _ai_lock:
+        _ai_state.update(kw)
+
+
+def ai_scrape_candidates(scope="missing", limit=0):
+    """AI 刮削的候选：缺年份或流派/风格的文件；scope=all 时全库都过一遍。"""
+    cols = "id,path,title,artist,album,genre,style,year,cover"
+    if scope == "all":
+        sql = f"SELECT {cols} FROM local_file ORDER BY id"
+        rows = db().execute(sql + (f" LIMIT {int(limit)}" if limit else "")).fetchall()
+    else:
+        sql = (f"SELECT {cols} FROM local_file "
+               "WHERE year IS NULL OR year=0 "
+               "OR genre IS NULL OR genre='' "
+               "OR style IS NULL OR style='' ORDER BY id")
+        rows = db().execute(sql + (f" LIMIT {int(limit)}" if limit else "")).fetchall()
+    return rows
+
+
+def ai_scrape_async(scope="missing", limit=0):
+    """后台跑 AI 刮削，避免同步请求占住线程直到超时。"""
+    with _ai_lock:
+        if _ai_state["running"]:
+            raise RuntimeError("AI 刮削任务正在运行")
+        _ai_state.update(running=True, done=0, total=0, ok=0, failed=0,
+                         ended_at=None, errors=[], logs=[])
+    threading.Thread(target=_ai_scrape_bg, args=(scope, limit),
+                     name="ai-scrape", daemon=True).start()
+    return ai_scrape_state()
+
+
+def _ai_scrape_bg(scope, limit):
+    from . import recommender, scraper
+
+    try:
+        rows = [dict(r) for r in ai_scrape_candidates(scope=scope, limit=limit)]
+        total = len(rows)
+        _set_ai(total=total)
+        cfg = recommender._llm_cfg()
+        # 一批装多少首：批越大调用次数越少，但单次响应超时/解析失败浪费也越大，
+        # 默认 20 首一批；rpm 限制批间间隔，默认 10 → 每批至少隔 6 秒
+        batch_n = max(1, int(cfg.get("ai_batch") or 20))
+        rpm = max(1, int(cfg.get("rpm") or 10))
+        delay = 60.0 / rpm
+        ok = failed = done = 0
+        errors, logs = [], []
+        for off in range(0, total, batch_n):
+            chunk = rows[off:off + batch_n]
+            items = [{"i": i + 1, "title": c.get("title") or os.path.basename(c["path"]),
+                      "artist": c.get("artist") or "", "album": c.get("album") or ""}
+                     for i, c in enumerate(chunk)]
+            got = {}
+            try:
+                got = recommender.enrich_tracks(items)
+            except Exception as e:                 # 整批失败：逐首记错，继续下一批
+                log_resolver.warning("AI 刮削一批（%s 首）失败：%s", len(chunk), e)
+                errors.append({"path": "", "error": f"一批 {len(chunk)} 首请求失败：{str(e)[:150]}"})
+            for i, c in enumerate(chunk):
+                done += 1
+                meta = got.get(str(i + 1)) or {}
+                year = int(meta.get("year") or 0)
+                genre = (meta.get("genre") or "").strip()
+                style = (meta.get("style") or "").strip()
+                name = c.get("title") or os.path.basename(c["path"])
+                if not (year or genre or style):
+                    failed += 1
+                    err = "模型没有返回该曲目的元数据"
+                    errors.append({"path": c["path"], "error": err})
+                    logs.append({"i": done, "total": total, "name": name,
+                                 "artist": c.get("artist") or "", "ok": False,
+                                 "fields": [], "source": "AI", "error": err, "logs": []})
+                    continue
+                fields = []
+                if year and not c.get("year"):
+                    fields.append("年份")
+                if genre and not (c.get("genre") or "").strip():
+                    fields.append("流派")
+                if style and not (c.get("style") or "").strip():
+                    fields.append("风格")
+                try:
+                    # 只补缺失字段：库里已有的值原样带上回写，避免把好数据冲掉
+                    new_meta = {"year": year or c.get("year") or 0,
+                                "genre": genre or (c.get("genre") or ""),
+                                "style": style or (c.get("style") or ""),
+                                "album": c.get("album") or "",
+                                "cover": c.get("cover") or ""}
+                    scraper._write_tags(c["path"], new_meta)
+                    write_scrape_tags(c["path"], new_meta)
+                    ok += 1
+                    logs.append({"i": done, "total": total, "name": name,
+                                 "artist": c.get("artist") or "", "ok": True,
+                                 "fields": fields or ["无新增"], "source": "AI",
+                                 "error": "", "logs": []})
+                except Exception as e:             # 单首写标签失败不影响其他
+                    failed += 1
+                    errors.append({"path": c["path"], "error": str(e)[:160]})
+                    logs.append({"i": done, "total": total, "name": name,
+                                 "artist": c.get("artist") or "", "ok": False,
+                                 "fields": [], "source": "AI",
+                                 "error": f"写标签失败：{str(e)[:140]}", "logs": []})
+            _set_ai(done=done, ok=ok, failed=failed,
+                    errors=errors[-200:], logs=logs[-300:])
+            if off + batch_n < total:
+                time.sleep(delay)                  # RPM 限速：批与批之间至少隔 60/rpm 秒
+        emit({"type": "progress", "stage": "scrape",
+              "detail": f"AI 刮削完成：成功 {ok} / 失败 {failed}"})
+    except Exception as e:                         # noqa: BLE001
+        # 异常必须落进状态里，否则前端只看到 running 卡死或 0/0，无从排查
+        log_resolver.error("AI 刮削任务异常：%s", e, exc_info=True)
+        _set_ai(running=False, ended_at=now(),
+                errors=[{"path": "", "error": f"AI 刮削任务异常：{e}"}],
+                logs=[{"i": 0, "total": 0, "name": "AI 刮削任务异常终止",
+                       "artist": "", "ok": False, "fields": [], "source": "",
+                       "error": str(e)[:300], "logs": []}])
+    else:
+        _set_ai(running=False, ended_at=now())
+
+
 def scrape_stats():
     """待刮削规模的概览：已刮削 / 缺流派 / 缺年份 / 缺封面 / 缺歌词。"""
     r = db().execute(

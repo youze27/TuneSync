@@ -53,7 +53,18 @@
         </el-table-column>
 
         <el-table-column label="失败次数" width="90" align="center">
-          <template #default="{ row }">{{ row.fail_count ?? 0 }}</template>
+          <template #default="{ row }">
+            <!-- 累计失败（err_count），和成功率括号里的分母同一口径；
+                 fail_count 是「连续失败」计数，成功一次就清零，只用于熔断 -->
+            <el-tooltip
+              v-if="row.fail_count > 0"
+              :content="`连续失败 ${row.fail_count} 次（达到阈值会熔断）`"
+              placement="top"
+            >
+              <span>{{ row.err_count ?? 0 }}</span>
+            </el-tooltip>
+            <span v-else>{{ row.err_count ?? 0 }}</span>
+          </template>
         </el-table-column>
 
         <el-table-column label="成功率" width="110" align="center">

@@ -389,6 +389,32 @@ class FeiniuWriter(PlaylistWriter):
         return (f'SELECT t.id, a."{pathc}" FROM track t JOIN audio_file a ON a.id = t."{afc}"',
                 f'a."{pathc}"')
 
+    @staticmethod
+    def _pick_path_row(rows, want):
+        """模糊匹配多条命中时选最可信的那条。
+
+        rows = [(track_id, db_path)]。飞牛重扫/换库后同一 basename 会留下多行
+        audio_file，旧行的 id 已失效——歌单挂上它 App 就显示「文件不存在」。
+        优选序：父目录名与期望路径一致 > 文件在容器内仍存在 > 路径最短。
+        """
+        if not rows:
+            return None
+        wparent = os.path.basename(os.path.dirname(want)) if want else ""
+
+        def rank(r):
+            dbp = r[1] or ""
+            score = 0
+            if wparent and os.path.basename(os.path.dirname(dbp)) == wparent:
+                score -= 100                      # 父目录一致：几乎肯定同一文件
+            try:
+                if os.path.isfile(dbp):           # 容器看得到的路径才校验，
+                    score -= 10                   # 宿主机路径 /vol1/... 自然跳过
+            except OSError:
+                pass
+            return (score, len(dbp))
+
+        return min(rows, key=rank)
+
     def _track_id(self, conn, path, res=None):
         """按文件路径反查 track.id。
 
@@ -403,15 +429,15 @@ class FeiniuWriter(PlaylistWriter):
         sel, col = r
         base = os.path.basename(path)
         # 1) 全路径精确；2) 路径结尾精确（飞牛可能把根目录换成别的挂载点）；
-        # 3) 退到 basename 模糊，且优先取路径最短的那条（下载目录优先）。
+        # 3) 退到 basename 模糊，多条命中时按 _pick_path_row 选最可信的。
         for cond, arg in ((f"{col}=?", path),
-                          (f"{col} LIKE ?", f"%/{base}"),
-                          (f"{col} LIKE ?", f"%{base}%")):
-            order = "" if cond.endswith("=?") else f" ORDER BY LENGTH({col})"
-            row = conn.execute(f"{sel} WHERE {cond}{order} LIMIT 1", (arg,)).fetchone()
+                          (f"{col} LIKE ?", f"%/{base}")):
+            row = conn.execute(f"{sel} WHERE {cond} LIMIT 1", (arg,)).fetchone()
             if row:
                 return row[0]
-        return None
+        rows = conn.execute(f"{sel} WHERE {col} LIKE ? LIMIT 50", (f"%{base}%",)).fetchall()
+        best = self._pick_path_row([(x[0], x[1]) for x in rows], path)
+        return best[0] if best else None
 
     def _resolve_many(self, conn, paths, res=None):
         """批量反查 {路径: track_id}。整批只跑 3 条 SQL，而不是每文件一次。
@@ -438,28 +464,34 @@ class FeiniuWriter(PlaylistWriter):
                             lambda n: f"{sel} WHERE {col} IN ({','.join('?' * n)})"):
             found.setdefault(p, tid)
 
-        # 2) 退到 basename 模糊：路径结尾精确 → 任意位置包含
+        # 2) 退到 basename 模糊：路径结尾精确 → 任意位置包含。
+        #    同 basename 的多条命中先全部收集，再用 _pick_path_row 统一选优
+        #    （父目录一致 > 文件仍存在 > 路径最短），避免选中飞牛重扫后
+        #    已失效的旧 audio_file 行——那正是歌单里「文件不存在」的来源。
         rest = [p for p in todo if p not in found]
         for tmpl in ("%/{base}", "%{base}%"):
             if not rest:
                 break
             bases = list(dict.fromkeys(os.path.basename(p) for p in rest))
-            # 按库路径长度升序返回，每个 basename 只认第一条：库里同名不同版本的
-            # 文件有 800 多组，路径最短的那条最接近推送时用的原始路径。
-            hit = {}
-            for tid, dbp in batch([tmpl.format(base=b) for b in bases],
-                                  lambda n: (f"{sel} WHERE " + " OR ".join([f"{col} LIKE ?"] * n)
-                                             + f" ORDER BY LENGTH({col})")):
-                # 前一档是后缀匹配，末段就是 basename，可以直接查表；
-                # 后一档是任意包含，得挨个试（bases 已经去重，量很小）。
+            rows = batch([tmpl.format(base=b) for b in bases],
+                         lambda n: (f"{sel} WHERE " + " OR ".join([f"{col} LIKE ?"] * n)
+                                    + " LIMIT 2000"))
+            cands = {}
+            for tid, dbp in rows:
                 b = (dbp.rsplit("/", 1)[-1] if tmpl == "%/{base}"
                      else max((x for x in bases if x in dbp), key=len, default=None))
-                if b and b not in hit:
-                    hit[b] = tid
-            for p in rest:
-                tid = hit.get(os.path.basename(p))
-                if tid:
-                    found.setdefault(p, tid)
+                if b:
+                    cands.setdefault(b, []).append((tid, dbp))
+            by_base = {}
+            for p in rest:                        # 同名不同路径时，用各自的期望路径选优
+                by_base.setdefault(os.path.basename(p), []).append(p)
+            for b, wants in by_base.items():
+                if b not in cands:
+                    continue
+                for p in wants:
+                    best = self._pick_path_row(cands[b], p)
+                    if best:
+                        found.setdefault(p, best[0])
             rest = [p for p in rest if p not in found]
         return found
 

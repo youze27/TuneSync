@@ -154,6 +154,45 @@ def _extract_json(text):
     raise RecommenderError("LLM 返回内容不是有效 JSON")
 
 
+# ── AI 元数据补全（刮削页）───────────────────────────────────
+
+AI_META_SYSTEM = (
+    "你是音乐元数据助手。输入一批歌曲（title/artist/album），返回每首的发行年份、流派与风格。"
+    '只输出 JSON：{"items":[{"i":编号,"year":1998,"genre":"流行","style":"国语流行"}]}。'
+    "year 必须是 4 位数字；genre 用主流派别（流行/摇滚/民谣/电子/Hip-Hop/R&B/古典/爵士 等）；"
+    "style 是更细的子风格（如 粤语流行/Synthwave/城市流行）。"
+    "拿不准的字段留空字符串，绝不编造；不认识的歌直接跳过该项。"
+)
+
+
+def enrich_tracks(items, override=None):
+    """批量补元数据：items=[{"i":1,"title","artist","album"?}]。
+
+    返回 {"1": {"year":1998,"genre":"流行","style":"国语流行"}, ...}。
+    模型漏答/答错编号的那首自然不出现在结果里，由调用方按单首失败处理——
+    一首歌出错绝不放大到整批。
+    """
+    data = _chat(json.dumps({"tracks": items}, ensure_ascii=False),
+                 system=AI_META_SYSTEM, override=override)
+    obj = _extract_json(_content(data))
+    out = {}
+    for it in (obj or {}).get("items") or []:
+        try:
+            i = str(int(it.get("i")))
+        except (TypeError, ValueError):
+            continue
+        try:
+            year = int(str(it.get("year"))[:4])
+        except (TypeError, ValueError):
+            year = 0
+        if not 1900 <= year <= 2100:
+            year = 0
+        out[i] = {"year": year,
+                  "genre": str(it.get("genre") or "").strip()[:40],
+                  "style": str(it.get("style") or "").strip()[:40]}
+    return out
+
+
 def generate_playlists(scene, count, prompt=None, tracks_per=None):
     """生成 count 张主题歌单。
 

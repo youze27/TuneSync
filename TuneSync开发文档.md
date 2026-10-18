@@ -663,3 +663,61 @@ NAS：  docker compose up -d --build   # 自包含构建，pull_policy: never
 - 前端契约测试 37 项（`frontend/tests/run-contract.cmd`，对真实后端发请求；改口令的 4 个用例默认跳过，`TS_CONTRACT_MUTATE_TARGETS=1` 开启，只对一次性实例跑）。
 - 外部网络全部打桩；SQLite 用临时库；LX 沙箱用 mock runner。
 
+## 3.15 第 13 轮修订（2026-10-18）
+
+### 运行队列与进度显示（仪表盘）
+
+- **诚实进度**：新增 `run_expected` WS 事件——每张歌单开跑时后端把它的曲目数累加进运行
+  的「期望总量」（`pipeline._process_playlist` 里的 `emit({"type": "run_expected", ...})`）。
+  前端进度条 = 已出结果首数（本地+下载+跳过）/ 期望总量，封顶 99%、结束置 100%。
+  歌单逐张开跑时分母会变大、百分比小幅回跳，这是刻意行为；取代旧版「0% 憋到结束跳 100%」。
+- **运行日志留档**：WS 只推给当时在线的页面，定时任务半夜跑完后打开仪表盘阶段日志是空的。
+  `pipeline._remember()` 现在把 progress/track 事件留一份内存副本（每 run 每类封顶 300 条、
+  最多保留 50 个 run），`GET /runs/logs?ids=` 批量取回；前端 `loadRuns()` 发现还在跑的运行
+  且本地一片空白时自动补齐（`hydrateRunLogs`），之后继续走 WS 增量。
+- **队列信息条**：等待中的任务显示「排在第 N 位 · 已等待 X 分 X 秒」，运行中的显示「推送中」，
+  不再只是一行含糊的等待时长。
+- **统计口径**：`GET /status` 的 `playlists_total` 改为 `playlist` 表总行数（按平台+source_id
+  去重的历史全部歌单，重跑不膨胀）；新增 `local_hit_total` = `SUM(run_playlist.local_hit)`，
+  即所有历史运行复用本地文件的累计次数——卡片改名「本地复用（累计）」，本次运行的复用数
+  仍在进度面板里单列。
+
+### 音源统计口径（音源管理页）
+
+`source` 表里有两个「失败」：`fail_count` 是**连续失败**计数（成功一次清零，只驱动熔断），
+`err_count` 是**累计失败**。UI「失败次数」列原来绑 `fail_count`，和成功率括号 `(ok/err)`
+里的分母对不上（正常 0 失败但成功率 68% 就是这么来的）。已改绑 `err_count` 同口径；
+`fail_count>0` 时鼠标悬停提示当前连续失败次数。
+
+### AI 元数据补全（刮削页新卡片）
+
+- 入口 `POST /scrape/ai-run`（body 同 `/scrape/run`：`scope`+`limit`）+ `GET /scrape/ai/status`。
+- 候选 = `local_file` 里缺年份或流派/风格的行（scope=all 全库）。
+- `recommender.enrich_tracks()` 把约 20 首合成一个 `/chat/completions` 请求
+  （system prompt 在 `recommender.AI_META_SYSTEM`），返回 `{"items":[{"i","year","genre","style"}]}`；
+  年份合法性 1900–2100，字段截断 40 字符。
+- 容错：整批请求失败只逐首记错误继续下一批；模型漏答/答错编号的单首记「没有返回该曲目的
+  元数据」；写标签失败单首记 error——一首歌出错绝不放大到整批。
+- 限速：批间间隔 `60/rpm` 秒（默认 rpm=10），批量大小取 `llm.ai_batch`（默认 20）。
+  只补缺失字段：库里已有的值原样带上回写（`cover` 也回传），不会冲掉线上六源刮到的好数据。
+- 前端在刮削页右列新增「AI 元数据补全」卡片：范围/上限/确认框/进度条/失败清单，进页面先
+  poll 一次状态（容器重启后接上正在跑的任务）。
+
+### 飞牛歌单「歌曲文件不存在」修复
+
+根因：飞牛重扫/换库后同一 basename 会留下多行 `audio_file`，旧行的 id 已失效；
+`FeiniuWriter` 的 basename 模糊匹配原来按「路径最短」取第一条，可能选中旧行，
+歌单挂上失效 id 后 App 就显示「文件不存在」（文件本身当然还在、还能播）。
+修复：新增 `FeiniuWriter._pick_path_row()` 统一选优——**父目录名与期望路径一致 >
+文件在容器内仍真实存在（`os.path.isfile`，宿主机路径自然跳过）> 路径最短**；
+`_track_id` 与 `_resolve_many` 的模糊档都走这个选优。每次推送本来就按歌单名
+删旧重插，重推一次即可修复存量歌单的关联。
+
+### 乐源拉取 · 场景推送（单独/合并）
+
+`push_mode=source_llm`（乐源拉取+AI 筛选）此前前端没暴露 `scene_mode`。已补齐：
+推送偏好页勾开「AI 筛选」后出现「场景推送」单选（单独/合并），选**合并**时
+「每场景歌单数」禁用（合并=所有场景候选一次送审，`_scene_rounds` 合成一轮、
+`select_playlists` 按综合主题一次挑完，数量由模型统一分配）。后端逻辑 3.3 已有，
+本次只是前端接通。
+

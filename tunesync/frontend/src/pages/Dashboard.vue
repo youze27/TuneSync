@@ -50,11 +50,11 @@
         hint="历史推送成功累计"
       />
       <StatCard
-        label="本地复用"
-        :value="summary.local"
+        label="本地复用（累计）"
+        :value="state.status?.local_hit_total ?? summary.local"
         icon="FolderOpened"
         color="#67c23a"
-        :hint="`下载 ${summary.downloaded} 首 · 跳过 ${summary.skipped} 首`"
+        :hint="`本次运行 复用 ${summary.local} · 下载 ${summary.downloaded} · 跳过 ${summary.skipped}`"
       />
       <StatCard
         label="本地库文件"
@@ -105,7 +105,8 @@
               <el-tag v-if="q.active" size="small" type="primary" effect="dark">运行中</el-tag>
               <el-tag v-else size="small" type="warning" effect="plain">等待中</el-tag>
               <span class="tr-title">{{ q.label }}</span>
-              <span v-if="q.since" class="muted">{{ sinceText(q.since) }}</span>
+              <span v-if="q.active" class="muted">推送中{{ q.since ? ' · ' + sinceText(q.since) : '' }}</span>
+              <span v-else class="muted">排在第 {{ i }} 位{{ q.since ? ' · ' + sinceText(q.since) : '' }}</span>
             </div>
           </div>
 
@@ -142,8 +143,6 @@
           <el-progress
             :percentage="progressPercent"
             :status="progressStatus"
-            :indeterminate="live.active && !live.ended"
-            :show-text="!live.active"
             :stroke-width="12"
             striped
             :striped-flow="live.active"
@@ -153,6 +152,9 @@
             <el-tag type="success" size="small">本地复用 {{ live.totals.local }}</el-tag>
             <el-tag type="primary" size="small">已下载 {{ live.totals.downloaded }}</el-tag>
             <el-tag type="info" size="small">已跳过 {{ live.totals.skipped }}</el-tag>
+            <el-tag v-if="live.active && live.expected" type="warning" size="small" effect="plain">
+              已处理 {{ processedCount }} / 预计 {{ live.expected }} 首
+            </el-tag>
             <el-tag v-if="state.status?.active_jobs" type="warning" size="small">
               待处理任务 {{ state.status.active_jobs }}
             </el-tag>
@@ -451,14 +453,22 @@ const failedPlaylists = computed(() =>
 )
 
 /**
- * 后端不提供总进度（既没有总曲目数也没有百分比），
- * 运行中就交给 indeterminate 的条纹动画表示「在跑」，不再拿已处理首数当百分比
- * ——处理 30 首就显示 30% 是彻头彻尾的假进度。结束后才是确定的 100%。
+ * 诚实进度：分母 = 后端 run_expected 逐歌单累加的曲目数，分子 = 已出结果
+ * （本地/下载/跳过）的首数。歌单是逐张开跑的，总量会中途变大、百分比小幅
+ * 回跳——这比之前 0% 一直憋到结束跳 100% 可读得多。
+ * 分母还没报（一张歌单都没开跑）时显示 0%，跑完固定 100%。
  */
+const processedCount = computed(() => {
+  const t = live.value.totals
+  return (t.local || 0) + (t.downloaded || 0) + (t.skipped || 0)
+})
+
 const progressPercent = computed(() => {
   const r = live.value
   if (!r.runId) return 0
-  return r.active ? 0 : 100
+  if (!r.active) return 100
+  if (!r.expected) return 0
+  return Math.min(99, Math.round((processedCount.value / r.expected) * 100))
 })
 
 const progressStatus = computed(() => {

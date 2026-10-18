@@ -39,6 +39,55 @@ _waiting = []      # [{guard, label, since}]，按到达顺序
 _active = None     # {guard, label, since}，当前正在跑的那一个
 
 
+# ── 运行日志留档 ──────────────────────────────────────────────
+# WS 事件只推给「当时在线」的页面：定时任务半夜跑完，早上打开仪表盘阶段日志
+# 就是一片空白。这里给每个 run 留一份内存副本（每类封顶 300 条，总量封顶 50 个
+# run，超出按 run_id 从小到大淘汰），前端收到 run_start 或刷新页面时用
+# GET /runs/logs 一次性补齐，补完之后 WS 继续增量推。
+_run_logs = {}
+_run_logs_lock = threading.Lock()
+_RUN_LOG_CAP = 300
+_RUN_KEEP = 50
+
+
+def _remember(run_id, kind, payload):
+    if not run_id:
+        return
+    with _run_logs_lock:
+        slot = _run_logs.setdefault(int(run_id), {"progress": [], "tracks": []})
+        slot[kind].append(payload)
+        if len(slot[kind]) > _RUN_LOG_CAP:
+            del slot[kind][:len(slot[kind]) - _RUN_LOG_CAP]
+        while len(_run_logs) > _RUN_KEEP:      # 老历史淘汰，防长期运行内存涨
+            oldest = min(_run_logs)
+            if oldest == int(run_id):
+                break
+            del _run_logs[oldest]
+
+
+def run_logs(run_ids):
+    """按 run_id 批量取留档日志。返回 {run_id: {progress:[], tracks:[]}}。"""
+    out = {}
+    with _run_logs_lock:
+        for rid in run_ids:
+            s = _run_logs.get(int(rid))
+            if s:
+                out[int(rid)] = {k: list(v) for k, v in s.items()}
+    return out
+
+
+def _emit_run(run_id, payload):
+    """pipeline 里 progress/track 事件的统一出口：广播 WS + 落一份留档。"""
+    emit(payload)
+    if payload.get("type") == "progress":
+        _remember(run_id, "progress",
+                  {"stage": payload.get("stage"), "detail": payload.get("detail")})
+    elif payload.get("type") == "track":
+        _remember(run_id, "tracks",
+                  {k: payload.get(k) for k in
+                   ("title", "artist", "status", "source", "file_path", "error")})
+
+
 def _q_snapshot():
     """取队列快照。调用方必须已持有 _q_lock。"""
     return {"active": dict(_active) if _active else None,
@@ -277,6 +326,7 @@ def _run_body(task, task_id, task_name):
     conn.commit()
     run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     emit({"type": "run_start", "run_id": run_id, "task_id": task_id, "task": task_name})
+    _remember(run_id, "progress", {"stage": "run", "detail": f"任务「{task_name}」开始运行"})
     try:
         summary = _run(task, run_id)
         # failed = 一个歌单都没打开（平台挂了 / 无结果）；否则有错就是 partial。
@@ -297,6 +347,7 @@ def _run_body(task, task_id, task_name):
     except Exception:
         pass
     emit({"type": "run_end", "run_id": run_id, "summary": summary})
+    _remember(run_id, "progress", {"stage": "end", "detail": f"运行结束：{json.dumps(summary, ensure_ascii=False)[:160]}"})
     log_pipeline.info("运行 #%s 结束：%s", run_id, summary)
     return run_id
 
@@ -330,7 +381,7 @@ def _resolve_one(tr, ctx, job_id, index=0):
         if result["status"] != "skipped":
             break
         if attempt < attempts:
-            emit({"type": "progress", "stage": "retry", "run_id": ctx["run_id"],
+            _emit_run(ctx["run_id"], {"type": "progress", "stage": "retry", "run_id": ctx["run_id"],
                   "run_playlist_id": ctx["rpid"], "job_id": job_id,
                   "detail": f"{title} - {artist} 第 {attempt} 次下载失败，{min(2 * attempt, 8)}s 后重试"})
             time.sleep(min(2 * attempt, 8))
@@ -341,22 +392,22 @@ def _resolve_one(tr, ctx, job_id, index=0):
     _update_job(job_id, result["status"], result.get("source"), result.get("path"),
                 result.get("error"))
     if result["status"] == "downloaded":
-        emit({"type": "progress", "stage": "scrape", "run_id": ctx["run_id"],
-              "run_playlist_id": ctx["rpid"], "job_id": job_id,
-              "detail": f"{title} - {artist}"})
+        _emit_run(ctx["run_id"], {"type": "progress", "stage": "scrape", "run_id": ctx["run_id"],
+                                  "run_playlist_id": ctx["rpid"], "job_id": job_id,
+                                  "detail": f"{title} - {artist}"})
         detail = scraper.scrape(result["path"], result["meta"], tr.get("sid"))
         result["scrape"] = detail
         # detail["meta"] 里的 lrc="1" 就是「有歌词」标记，write_scrape_tags 会存进索引
         resolver.write_scrape_tags(result["path"], detail.get("meta") or {})
         got = scraper.label_hits(detail.get("hits") or {}) or ["无新增字段"]
-        emit({"type": "progress", "stage": "scrape", "run_id": ctx["run_id"],
-              "run_playlist_id": ctx["rpid"], "job_id": job_id,
-              "detail": f"{title} · " + "、".join(got)})
+        _emit_run(ctx["run_id"], {"type": "progress", "stage": "scrape", "run_id": ctx["run_id"],
+                                  "run_playlist_id": ctx["rpid"], "job_id": job_id,
+                                  "detail": f"{title} · " + "、".join(got)})
         _update_job(job_id, "done", result["source"], result["path"], None)
-    emit({"type": "track", "run_id": ctx["run_id"], "run_playlist_id": ctx["rpid"],
-          "job_id": job_id, "title": title, "artist": artist, "status": result["status"],
-          "source": result["source"], "file_path": result["path"],
-          "error": result.get("error")})
+    _emit_run(ctx["run_id"], {"type": "track", "run_id": ctx["run_id"], "run_playlist_id": ctx["rpid"],
+                              "job_id": job_id, "title": title, "artist": artist, "status": result["status"],
+                              "source": result["source"], "file_path": result["path"],
+                              "error": result.get("error")})
     return result
 
 
@@ -402,9 +453,14 @@ def _process_playlist(run_id, rpid, platform, category, playlist, summary, pool)
                      (err, rpid))
         conn.commit()
         summary["errors"].append(f"[{platform}] {playlist['name']}：{err}")
-        emit({"type": "progress", "stage": "fetch-error", "run_id": run_id,
-              "detail": f"{platform}/{playlist['name']}: {err}"})
+        _emit_run(run_id, {"type": "progress", "stage": "fetch-error", "run_id": run_id,
+                           "detail": f"{platform}/{playlist['name']}: {err}"})
         return None
+
+    # 总进度期望值：每个歌单开跑时把它的曲目数累加进「已知的总量」。
+    # 前端进度条 = 已处理首数 / 期望总量，新歌单开跑时百分比会回跳一点，
+    # 这是诚实进度（总曲数要等场景全部拉完才能定），比 0→100 直跳可读得多。
+    emit({"type": "run_expected", "run_id": run_id, "add": len(tracks)})
 
     ctx = {"run_id": run_id, "rpid": rpid}
     job_ids = _create_jobs(rpid, tracks)
@@ -442,10 +498,10 @@ def _process_playlist(run_id, rpid, platform, category, playlist, summary, pool)
                 err = f"下载超时（单首超过 {track_timeout}s）"
                 results.append(_skipped_result(i, err))
                 _update_job(job_ids[i], "skipped", None, None, err)
-                emit({"type": "track", "run_id": run_id, "run_playlist_id": rpid,
-                      "job_id": job_ids[i], "title": tracks[i].get("title", ""),
-                      "artist": tracks[i].get("artist", ""), "status": "skipped",
-                      "source": None, "file_path": None, "error": err})
+                _emit_run(run_id, {"type": "track", "run_id": run_id, "run_playlist_id": rpid,
+                                   "job_id": job_ids[i], "title": tracks[i].get("title", ""),
+                                   "artist": tracks[i].get("artist", ""), "status": "skipped",
+                                   "source": None, "file_path": None, "error": err})
         if progressed:
             last_beat = time.time()
         elif time.time() - last_beat > stall_timeout:
@@ -504,18 +560,18 @@ def _run(task, run_id):
     write_jobs = []
     with ThreadPoolExecutor(max_workers=_concurrency(), thread_name_prefix="resolve") as pool:
         for category, scene, cat_name in _scene_rounds(categories, prompt, scene_mode):
-            emit({"type": "progress", "stage": "fetch", "run_id": run_id,
-                  "detail": prompt or scene})
+            _emit_run(run_id, {"type": "progress", "stage": "fetch", "run_id": run_id,
+                               "detail": prompt or scene})
             try:
                 if push_mode == "llm":
                     playlists = _fetch_llm_playlists(scene, count, prompt, tracks_per)
                 else:
                     playlists = _fetch_source_playlists(push_mode, source_plats,
-                                                       scene, count, prompt)
+                                                        scene, count, prompt)
             except Exception as e:
                 summary["errors"].append(f"取歌单失败 [{scene}]：{str(e)[:120]}")
-                emit({"type": "progress", "stage": "fetch-error", "run_id": run_id,
-                      "detail": f"{scene}: {str(e)[:120]}"})
+                _emit_run(run_id, {"type": "progress", "stage": "fetch-error", "run_id": run_id,
+                                   "detail": f"{scene}: {str(e)[:120]}"})
                 continue
 
             for pl in playlists:
@@ -689,13 +745,13 @@ def _sync_targets(run_id, jobs, summary):
 
     for w in built:
         if isinstance(w, writers.NavidromeWriter):
-            emit({"type": "progress", "stage": "scan", "run_id": run_id,
-                  "detail": "等待 Navidrome 扫描新文件"})
+            _emit_run(run_id, {"type": "progress", "stage": "scan", "run_id": run_id,
+                               "detail": "等待 Navidrome 扫描新文件"})
             w.start_scan()
             w.wait_scan()
         for job in jobs:
-            emit({"type": "progress", "stage": "write", "run_id": run_id,
-                  "detail": f"{w.name}: {job['name']}"})
+            _emit_run(run_id, {"type": "progress", "stage": "write", "run_id": run_id,
+                               "detail": f"{w.name}: {job['name']}"})
             try:
                 result = w.upsert(job["name"], job["pairs"], job["files"])
                 db().execute("UPDATE run_playlist SET status=? WHERE id=?", (result[:300], job["rpid"]))
@@ -748,6 +804,8 @@ def _import_body(platform, pid):
     run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     emit({"type": "run_start", "run_id": run_id, "task_id": None,
           "task": f"导入歌单 {platform}#{pid}"})
+    _remember(run_id, "progress",
+              {"stage": "run", "detail": f"导入歌单 {platform}#{pid} 开始运行"})
     try:
         summary = _run_import(platform, pid, run_id)
         nothing_usable = summary.get("playlists", 0) == 0 and summary.get("attempted", 0) == 0
@@ -779,8 +837,8 @@ def _run_import(platform, pid, run_id):
         detail = platforms.detail(platform, pid)
     except Exception as e:
         summary["errors"].append(f"拉取歌单失败：{str(e)[:200]}")
-        emit({"type": "progress", "stage": "fetch-error", "run_id": run_id,
-              "detail": str(e)[:120]})
+        _emit_run(run_id, {"type": "progress", "stage": "fetch-error", "run_id": run_id,
+                           "detail": str(e)[:120]})
         return summary
     if not detail.get("tracks"):
         summary["errors"].append(

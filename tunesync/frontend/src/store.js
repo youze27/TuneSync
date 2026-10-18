@@ -120,6 +120,10 @@ export function runSlot(runId) {
       tracks: [],
       totals: { local: 0, downloaded: 0, skipped: 0 },
       ended: null,
+      // 进度条口径：expected 由后端 run_expected 事件累加（每张歌单开跑时
+      // 报上它的曲目数），processed = totals 三项之和。两栏都有才算可信百分比。
+      expected: 0,
+      logsLoaded: false,
     }
   }
   return state.runs[runId]
@@ -150,6 +154,39 @@ export async function loadRuns() {
       slot.ended = r.summary ? JSON.parse(r.summary) : null
     })
     if (!state.liveId && rows.length) state.liveId = rows[0].id
+    // 还在跑的运行补拉留档日志：WS 只推给当时在线的页面，
+    // 半路打开/刷新后阶段日志和歌曲进度都靠这个补齐
+    await Promise.all(rows
+      .filter((r) => r.status === 'running')
+      .map((r) => hydrateRunLogs(state.runs[r.id])))
+  } catch {
+    /* 拉不到就等 WS 推 */
+  }
+}
+
+/**
+ * 从 GET /runs/logs 补齐某个 run 的留档日志。
+ * 只在本地一片空白时拉（避免和 WS 推的增量重复）；
+ * 拉完 logsLoaded 置位，之后的进度都走 WS。
+ */
+async function hydrateRunLogs(slot) {
+  if (!slot || slot.logsLoaded || slot.progress.length || slot.tracks.length) return
+  slot.logsLoaded = true
+  try {
+    const data = await api.getRunLogs(slot.runId)
+    const s = data?.[String(slot.runId)] || data?.[slot.runId]
+    if (!s) return
+    ;(s.progress || []).forEach((p) => pushProgress(slot, { stage: p.stage, detail: p.detail }))
+    ;(s.tracks || []).forEach((t) => {
+      if (t.status && slot.totals[t.status] !== undefined) slot.totals[t.status] += 1
+      slot.tracks.push({
+        title: t.title, artist: t.artist, status: t.status,
+        source: t.source, file_path: t.file_path, error: t.error, at: '',
+      })
+    })
+    if (slot.tracks.length > MAX_TRACKS) {
+      slot.tracks.splice(0, slot.tracks.length - MAX_TRACKS)
+    }
   } catch {
     /* 拉不到就等 WS 推 */
   }
@@ -411,11 +448,21 @@ export function handleWsMessage(msg) {
       slot.tracks = []
       slot.totals = { local: 0, downloaded: 0, skipped: 0 }
       slot.ended = null
+      slot.expected = 0
+      slot.logsLoaded = true
       // 只有当前没有正在展示的运行（或者展示的那片已经结束）才自动切前台，
       // 否则排队里第二个任务开始时会把第一个还在跑的进度抢走。
       const cur = state.liveId ? state.runs[state.liveId] : null
       if (!cur || cur === slot || !cur.active) state.liveId = msg.run_id
       pushProgress(slot, { stage: 'run', detail: `任务「${slot.taskName || msg.run_id}」开始运行` })
+      break
+    }
+
+    case 'run_expected': {
+      // 每张歌单开跑时后端报上曲目数，进度条分母累加——
+      // 总量随场景拉取逐步变大，百分比会小幅回跳，这是诚实进度
+      const slot = msg.run_id ? runSlot(msg.run_id) : liveRun.value
+      if (slot) slot.expected = (slot.expected || 0) + (msg.add || 0)
       break
     }
 

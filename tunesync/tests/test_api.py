@@ -885,9 +885,12 @@ class TestLibraryAndStatus:
     def test_status_shape(self, client):
         s = client.get("/api/status").json()
         assert set(s) == {"sources", "last_run", "running", "fetching_now",
-                          "library_files", "active_jobs", "queue", "playlists_total"}
+                          "library_files", "active_jobs", "queue", "playlists_total",
+                          "local_hit_total"}
         assert s["last_run"] is None and s["running"] == []
         assert s["playlists_total"] == 0
+        # 本地复用累计：没有任何运行时为 0
+        assert s["local_hit_total"] == 0
         # 推送队列是串行的，空闲时谁也没在跑、也没人排队
         assert s["queue"] == {"active": None, "waiting": [], "depth": 0}
 

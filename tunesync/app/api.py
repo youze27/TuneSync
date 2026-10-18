@@ -473,6 +473,22 @@ def run_queue():
     return pipeline.queue_state()
 
 
+@router.get("/runs/logs", tags=["运行历史"])
+def run_logs(ids: str):
+    """按 run_id 批量取留档的进度/曲目日志（逗号分隔）。
+
+    WS 只推给当时在线的页面；定时任务跑完后才打开仪表盘时，
+    靠这个接口把阶段日志和歌曲进度补齐。
+    """
+    want = []
+    for x in (ids or "").split(","):
+        try:
+            want.append(int(x))
+        except ValueError:
+            continue
+    return pipeline.run_logs(want)
+
+
 # ------------------------------------------------------------------ 运行历史
 
 @router.get("/runs", tags=["运行历史"])
@@ -1287,6 +1303,28 @@ def scrape_status():
     return resolver.scrape_state()
 
 
+@router.post("/scrape/ai-run", tags=["刮削"])
+def scrape_ai_run(body: ScrapeRunIn):
+    """AI 批量刮削：用 LLM 补年份/流派/风格，合并成批请求省调用次数。
+
+    单首失败只记错误不放大到整批；进度走 /scrape/ai/status 轮询。
+    """
+    if not recommender.is_configured():
+        raise HTTPException(400, "LLM 未配置：先在「全局设置」页的「LLM 歌单生成」卡片填好接口地址与模型")
+    probe = [r for r in resolver.ai_scrape_candidates(scope=body.scope, limit=1)]
+    if not probe:
+        raise HTTPException(400, "没有需要 AI 补的文件：年份/流派都齐了，或范围内没有文件")
+    try:
+        return resolver.ai_scrape_async(scope=body.scope, limit=body.limit)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
+@router.get("/scrape/ai/status", tags=["刮削"])
+def scrape_ai_status():
+    return resolver.ai_scrape_state()
+
+
 # ------------------------------------------------------------------ 状态总览
 
 @router.get("/status", tags=["系统"])
@@ -1298,11 +1336,12 @@ def status():
         "WHERE r.status='running' ORDER BY r.id")]
     lib = db().execute("SELECT COUNT(*) c FROM local_file").fetchone()["c"]
     q = pipeline.queue_state()
-    # 历史推送成功的歌单总数：解析完成且同步没有记 sync-failed 的才算成功
-    playlists_total = db().execute(
-        "SELECT COUNT(*) c FROM run_playlist WHERE status='resolved' "
-        "AND (error IS NULL OR error='' OR error NOT LIKE 'sync-failed%')"
-    ).fetchone()["c"]
+    # 歌单总数 = 历史推送过的全部歌单（playlist 表按 平台+source_id 去重，重跑不膨胀），
+    # 只看最近一次 run 的 run_playlist 会随着新运行来回变，用户要的是累计数
+    playlists_total = db().execute("SELECT COUNT(*) c FROM playlist").fetchone()["c"]
+    # 本地复用累计：所有历史运行加起来复用了多少首本地文件
+    local_hit_total = db().execute(
+        "SELECT COALESCE(SUM(local_hit),0) c FROM run_playlist").fetchone()["c"]
     return {
         "sources": [{k: s[k] for k in ("id", "name", "priority", "enabled", "health",
                                         "fail_count", "ok_count", "err_count",
@@ -1317,6 +1356,7 @@ def status():
         "fetching_now": pipeline.now_running(),
         "library_files": lib,
         "playlists_total": playlists_total,
+        "local_hit_total": local_hit_total,
         "active_jobs": db().execute(
             "SELECT COUNT(*) c FROM download_job WHERE status IN ('pending','downloading','scraping')"
         ).fetchone()["c"],

@@ -324,6 +324,88 @@
             </el-form-item>
           </el-form>
         </el-card>
+
+        <el-card shadow="never" class="mt-12">
+          <template #header>
+            <div class="card-head">
+              <span class="card-title"><el-icon><Cpu /></el-icon> AI 元数据补全</span>
+              <el-tag v-if="aiState.running" type="primary" effect="dark" size="small">进行中</el-tag>
+            </div>
+          </template>
+
+          <el-form label-width="108px" label-position="left">
+            <el-form-item label="工作方式">
+              <div class="muted tip" style="margin-left: 0">
+                用「全局设置」里配置的 LLM 批量补<b>年份 / 流派 / 风格</b>：约 20 首合成一个请求、
+                按 RPM 限速控制调用频率；单首失败只记错误，不影响其他歌。只补缺失项，
+                标签里已有的值不会被覆盖
+              </div>
+            </el-form-item>
+
+            <el-form-item label="处理范围">
+              <el-radio-group v-model="aiScope">
+                <el-radio-button value="missing">只补缺失字段</el-radio-button>
+                <el-radio-button value="all">全库重来</el-radio-button>
+              </el-radio-group>
+              <div class="muted tip">
+                「全库重来」会把已有年份/流派一并送给模型复核，但已有的值仍然不会被覆盖
+              </div>
+            </el-form-item>
+
+            <el-form-item label="数量上限">
+              <el-input-number v-model="aiLimit" :min="0" :max="20000" :step="100" controls-position="right" />
+              <span class="muted" style="margin-left: 10px; font-size: 12px">0 = 不限，全按范围跑</span>
+            </el-form-item>
+
+            <el-form-item>
+              <el-button
+                type="primary"
+                :icon="Cpu"
+                :loading="aiState.running"
+                :disabled="aiState.running"
+                @click="runAi"
+              >
+                {{ aiState.running ? `AI 补全中 ${aiState.done || 0}/${aiState.total || 0}` : '开始 AI 补全' }}
+              </el-button>
+            </el-form-item>
+          </el-form>
+
+          <div v-if="aiState.running || aiState.ended_at" class="run-box">
+            <div class="run-head">
+              <el-progress
+                :percentage="aiPct"
+                :status="aiState.failed ? 'exception' : aiState.running ? undefined : 'success'"
+                :stroke-width="14"
+                :format="() => `${aiState.done || 0}/${aiState.total || 0}`"
+              />
+              <div class="run-meta">
+                <span class="ok">成功 {{ aiState.ok || 0 }}</span>
+                <span class="failed">失败 {{ aiState.failed || 0 }}</span>
+                <span v-if="!aiState.running && aiState.ended_at" class="muted">
+                  {{ aiState.ended_at }} 结束 · 去
+                  <router-link to="/library">本地乐库</router-link> 看新标签
+                </span>
+              </div>
+            </div>
+
+            <el-collapse v-if="aiErrors.length" v-model="aiOpen" class="mt-12">
+              <el-collapse-item name="ai-fail">
+                <template #title>
+                  <span class="panel-title">
+                    失败清单
+                    <el-tag size="small" type="danger" effect="plain">{{ aiErrors.length }} 条</el-tag>
+                  </span>
+                </template>
+                <div class="log-box scroll-y">
+                  <div v-for="(e, i) in aiErrors" :key="i" class="log-line is-fail">
+                    <span class="break-all">{{ e.path || '（整批请求失败）' }}</span>
+                    <span class="muted">{{ e.error }}</span>
+                  </div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
+          </div>
+        </el-card>
       </el-col>
     </el-row>
   </div>
@@ -333,7 +415,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Check, MagicStick, Refresh, RefreshLeft, Search, Setting, Timer, VideoPlay,
+  Check, Cpu, MagicStick, Refresh, RefreshLeft, Search, Setting, Timer, VideoPlay,
 } from '@element-plus/icons-vue'
 import * as api from '../api.js'
 
@@ -623,6 +705,66 @@ async function load() {
     loading.value = false
   }
 }
+
+// ───────────────────────────── AI 元数据补全
+
+const aiScope = ref('missing')
+const aiLimit = ref(0)
+const aiOpen = ref('')
+const aiState = reactive({
+  running: false, done: 0, total: 0, ok: 0, failed: 0, ended_at: null, errors: [],
+})
+const aiErrors = computed(() => aiState.errors || [])
+const aiPct = computed(() => {
+  if (!aiState.total) return 0
+  return Math.min(100, Math.round(((aiState.done || 0) / aiState.total) * 100))
+})
+
+let aiTimer = null
+
+async function pollAi() {
+  try {
+    const s = await api.getScrapeAiStatus()
+    Object.assign(aiState, s, { errors: s.errors || [] })
+    if (!s.running && aiTimer) {
+      clearInterval(aiTimer)
+      aiTimer = null
+      load()                     // 跑完刷一次统计，覆盖率立即可见
+    }
+  } catch {
+    /* 轮询失败下轮再说 */
+  }
+}
+
+async function runAi() {
+  try {
+    await ElMessageBox.confirm(
+      '将用 LLM 批量补年份 / 流派 / 风格并写入文件标签，耗时取决于库的大小与 RPM 限制。确认开始？',
+      'AI 元数据补全',
+      { type: 'warning', confirmButtonText: '开始', cancelButtonText: '再想想' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const s = await api.runScrapeAi({ scope: aiScope.value, limit: aiLimit.value })
+    Object.assign(aiState, s, { errors: s.errors || [] })
+    if (!aiTimer) aiTimer = setInterval(pollAi, 2000)
+    ElMessage.success('AI 补全已开始，进度见下方')
+  } catch (e) {
+    api.toastError(e, '启动 AI 补全失败')
+  }
+}
+
+// 进页面先问一次：容器重启后浏览器不知道有任务在跑，靠这里接上
+onMounted(() => {
+  pollAi().then(() => {
+    if (aiState.running && !aiTimer) aiTimer = setInterval(pollAi, 2000)
+  })
+})
+onUnmounted(() => {
+  if (aiTimer) clearInterval(aiTimer)
+})
 </script>
 
 <style scoped>

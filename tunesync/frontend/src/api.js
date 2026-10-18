@@ -89,6 +89,7 @@ export const getLatestRun = () => http.get('/runs/latest')
 export const getRun = (id) => http.get(`/runs/${id}`)
 // 推送队列：正在跑的那一个 + 排队的若干个。WS 断了也能兜底查。
 export const getRunQueue = () => http.get('/runs/queue')
+export const getRunLogs = (id) => http.get('/runs/logs', { params: { ids: String(id) } })
 
 // ───────────────────────────── 音源
 
@@ -143,6 +144,8 @@ export const getScrapeStats = () => http.get('/scrape/stats')
 export const getScrapeCandidates = (params) => http.get('/scrape/candidates', { params })
 export const runScrape = (body) => http.post('/scrape/run', body)
 export const getScrapeStatus = () => http.get('/scrape/status')
+export const runScrapeAi = (body) => http.post('/scrape/ai-run', body)
+export const getScrapeAiStatus = () => http.get('/scrape/ai/status')
 
 // ───────────────────────────── 歌单导入
 

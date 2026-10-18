@@ -193,9 +193,25 @@
                     </div>
                   </el-form-item>
 
+                  <!-- 开了 AI 筛选才有「场景怎么推」的选择：单独=每场景各筛各的，合并=一次送审 -->
+                  <el-form-item v-if="draft.aiFilter" label="场景推送">
+                    <el-radio-group v-model="draft.scene_mode" class="mode-group">
+                      <el-radio-button v-for="m in SCENE_MODES" :key="m.key" :value="m.key">
+                        {{ m.label }}
+                      </el-radio-button>
+                    </el-radio-group>
+                    <div class="muted tip-one" :title="sceneModeDesc">{{ sceneModeDesc }}</div>
+                  </el-form-item>
+
                   <el-form-item label="每场景歌单数" prop="count_per">
-                    <el-input-number v-model="draft.count_per" :min="1" :max="50" controls-position="right" />
-                    <div class="muted tip-one">每个场景要几张歌单（1–50），关掉 AI 筛选时按平台热度取前 N 张</div>
+                    <el-input-number
+                      v-model="draft.count_per"
+                      :min="1"
+                      :max="50"
+                      controls-position="right"
+                      :disabled="draft.aiFilter && isMerge"
+                    />
+                    <div class="muted tip-one">{{ countPerSourceTip }}</div>
                   </el-form-item>
 
                   <el-form-item label="搜索关键词">
@@ -332,6 +348,13 @@ const sceneModeDesc = computed(
 const countPerTip = computed(() =>
   isMerge.value ? '合并推送只产出一张综合歌单，这里不生效' : '每个场景生成多少张歌单（1–50）',
 )
+
+/** 乐源拉取分支里「每场景歌单数」的提示：随 AI 筛选/场景模式变化。 */
+const countPerSourceTip = computed(() => {
+  if (!draft.aiFilter) return '关掉 AI 筛选时按平台热度取前 N 张（每个场景）'
+  if (isMerge.value) return '合并筛选时由模型统一按场景挑选，这里不生效'
+  return '每个场景要几张歌单（1–50），由 AI 按场景挑选'
+})
 
 const cronDesc = computed(() => describeCron(draft.cron_expr))
 
