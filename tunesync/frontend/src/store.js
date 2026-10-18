@@ -132,10 +132,6 @@ export function runSlot(runId) {
 /** 聚焦的进度分片；还没有任何运行时返回 null，模板里用 EMPTY_LIVE 兜底。 */
 export const liveRun = computed(() => state.runs[state.liveId] || null)
 
-/** 全部进度分片，新的在前。仪表盘用它把多个任务的进度并排列出来。 */
-export const allRuns = computed(() =>
-  Object.values(state.runs).sort((a, b) => b.runId - a.runId))
-
 /** 有任务正在跑（不含排队）。顶部的「运行中」标记看它。 */
 export const anyRunning = computed(() =>
   Object.values(state.runs).some((r) => r.active))
@@ -425,6 +421,12 @@ export function handleWsMessage(msg) {
   if (!msg || !msg.type) return
   switch (msg.type) {
     case 'hello':
+      break
+
+    case 'resync':
+      // WS 重连：断线期间后端的进度/结束事件全丢了，用 REST 拉回权威状态
+      loadRuns()
+      loadQueue()
       break
 
     case 'queue':

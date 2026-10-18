@@ -18,6 +18,7 @@ let socket = null
 let retryTimer = null
 let attempt = 0
 let manualClose = false
+let everOpened = false
 const listeners = new Set()
 
 const BACKOFF = [1000, 2000, 4000, 8000, 15000]
@@ -84,7 +85,13 @@ export function connect() {
     return
   }
 
-  socket.onopen = () => setStatus('open')
+  socket.onopen = () => {
+    setStatus('open')
+    // 重连成功：断线期间后端发生的 run_start/run_end 全部收不到，
+    // 分片会永远停在半途（已结束的还显示「运行中」）。通知 store 重拉一次权威状态。
+    if (everOpened) dispatch({ type: 'resync' })
+    everOpened = true
+  }
   socket.onmessage = (ev) => {
     let msg
     try {

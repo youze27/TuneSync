@@ -89,7 +89,7 @@
             </div>
           </template>
 
-          <!-- 推送全局串行：正在跑的排最前（active），后面按等待顺序列出 -->
+          <!-- 推送是全局串行的：同一时刻只可能有一个 run 在跑，所以这里就是唯一一份清单 -->
           <div v-if="queueRows.length" class="queue-box mb-12">
             <div class="queue-head">
               <span class="muted">运行队列</span>
@@ -107,28 +107,6 @@
               <span class="tr-title">{{ q.label }}</span>
               <span v-if="q.active" class="muted">推送中{{ q.since ? ' · ' + sinceText(q.since) : '' }}</span>
               <span v-else class="muted">排在第 {{ i }} 位{{ q.since ? ' · ' + sinceText(q.since) : '' }}</span>
-            </div>
-          </div>
-
-          <!--
-            多个任务同时在页面上时按 run 分行展示：队列是串行的，但排队期间前一个的
-            进度还没被看过，直接覆盖就丢了。每行点一下切换下面的明细。
-          -->
-          <div v-if="allRuns.length > 1" class="multi-run mb-12">
-            <div
-              v-for="r in allRuns"
-              :key="r.runId"
-              class="run-row"
-              :class="{ on: r.runId === state.liveId }"
-              @click="focusRun(r.runId)"
-            >
-              <span class="tr-title">#{{ r.runId }} {{ r.taskName || '—' }}</span>
-              <el-tag v-if="r.active" size="small" type="primary">运行中</el-tag>
-              <el-tag v-else-if="r.ended" size="small" type="success">已结束</el-tag>
-              <el-tag v-else size="small" type="info">待运行</el-tag>
-              <span class="muted">
-                本地 {{ r.totals.local }} · 下载 {{ r.totals.downloaded }} · 跳过 {{ r.totals.skipped }}
-              </span>
             </div>
           </div>
 
@@ -329,7 +307,7 @@ import { Calendar, Clock, DataAnalysis, FolderChecked, FolderOpened, Files, Head
 import * as api from '../api.js'
 import HealthTag from '../components/HealthTag.vue'
 import StatCard from '../components/StatCard.vue'
-import { allRuns, anyRunning, catName, liveRun, refreshDashboard, stageLabel, state } from '../store.js'
+import { anyRunning, catName, liveRun, refreshDashboard, stageLabel, state } from '../store.js'
 import { fmtAgo, fmtDuration, fmtTime, runStatusTag, summaryOf, trackStatusTag } from '../utils.js'
 
 const router = useRouter()
@@ -342,7 +320,6 @@ const EMPTY_LIVE = {
   progress: [], tracks: [], totals: { local: 0, downloaded: 0, skipped: 0 }, ended: null,
 }
 const live = computed(() => liveRun.value || EMPTY_LIVE)
-const focusRun = (runId) => { state.liveId = runId }
 const rescanLoading = ref(false)
 const checkingAll = ref(false)
 const trackBox = ref(null)
@@ -585,13 +562,6 @@ watch(
 }
 .queue-box .run-row {
   cursor: default;
-}
-.multi-run {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 168px;
-  overflow-y: auto;
 }
 .run-row {
   display: flex;
