@@ -466,8 +466,20 @@ def _process_playlist(run_id, rpid, platform, category, playlist, summary, pool)
     job_ids = _create_jobs(rpid, tracks)
     results = []
     indexed = list(enumerate(tracks))
-    futures = {pool.submit(_resolve_one, tr, ctx, job_ids[i], i): i
-               for i, tr in indexed}
+    run_start = {}          # index -> worker 真正开始执行的时刻
+    run_start_lock = threading.Lock()
+
+    def _timed(i, tr, job_id):
+        """包装 _resolve_one：进入 worker 时才打超时起点，排队时间不计入。"""
+        with run_start_lock:
+            run_start[i] = time.time()
+        try:
+            return _resolve_one(tr, ctx, job_id, i)
+        finally:
+            with run_start_lock:
+                run_start.pop(i, None)
+
+    futures = {pool.submit(_timed, i, tr, job_ids[i]): i for i, tr in indexed}
 
     def _skipped_result(i, err):
         return {"status": "skipped", "path": None, "source": None,
@@ -478,7 +490,6 @@ def _process_playlist(run_id, rpid, platform, category, playlist, summary, pool)
     # 看门狗收尾，剩余一律记失败。被杀不掉的线程靠请求自身的 TIMEOUT 自然消亡。
     track_timeout = max(60, int(merged_config().get("download", {}).get("track_timeout", 300) or 300))
     stall_timeout = max(track_timeout, int(merged_config().get("download", {}).get("stall_timeout", 900) or 900))
-    started = {f: time.time() for f in futures}
     pending = set(futures)
     last_beat = time.time()
     while pending:
@@ -492,16 +503,21 @@ def _process_playlist(run_id, rpid, platform, category, playlist, summary, pool)
                     results.append(fut.result())
                 except Exception as e:   # 理论上 _resolve_one 已兜底，这里是最后一道保险
                     results.append(_skipped_result(i, f"任务异常：{str(e)[:120]}"))
-            elif time.time() - started[fut] > track_timeout:
-                pending.discard(fut)
-                progressed = True
-                err = f"下载超时（单首超过 {track_timeout}s）"
-                results.append(_skipped_result(i, err))
-                _update_job(job_ids[i], "skipped", None, None, err)
-                _emit_run(run_id, {"type": "track", "run_id": run_id, "run_playlist_id": rpid,
-                                   "job_id": job_ids[i], "title": tracks[i].get("title", ""),
-                                   "artist": tracks[i].get("artist", ""), "status": "skipped",
-                                   "source": None, "file_path": None, "error": err})
+            else:
+                # 单首超时只看「真正在跑」的任务：_timed 开始执行时才打点。
+                # 一张歌单几十上百首、并发只有几，排在后面的歌整段时间都在
+                # 等待队列里，绝不能按提交时刻判超时——否则会把整个队列误杀。
+                t0 = run_start.get(i)
+                if t0 and time.time() - t0 > track_timeout:
+                    pending.discard(fut)
+                    progressed = True
+                    err = f"下载超时（单首超过 {track_timeout}s）"
+                    results.append(_skipped_result(i, err))
+                    _update_job(job_ids[i], "skipped", None, None, err)
+                    _emit_run(run_id, {"type": "track", "run_id": run_id, "run_playlist_id": rpid,
+                                       "job_id": job_ids[i], "title": tracks[i].get("title", ""),
+                                       "artist": tracks[i].get("artist", ""), "status": "skipped",
+                                       "source": None, "file_path": None, "error": err})
         if progressed:
             last_beat = time.time()
         elif time.time() - last_beat > stall_timeout:

@@ -788,3 +788,22 @@ NAS：  docker compose up -d --build   # 自包含构建，pull_policy: never
 `_scrape_one` 异常全收敛、每首完成即 emit `scrape_progress`（进度条 1.5s 轮询 +
 WS 实时）。
 
+### 同一处 bug 在推送下载侧的修复（第 15 轮）
+
+`_process_playlist`（pipeline.py）里有一份**完全相同**的排队误杀：
+`started = {f: time.time() for f in futures}` 在提交时给整张歌单所有曲目打点，
+`download.track_timeout`（300s）一旦小于「前面所有歌跑完所需时间」，排在后面的
+歌整段都在等待队列里却被判「下载超时（单首超过 300s）」批量跳过。
+默认并发只有 5、一张歌单几十首，每首含搜索 + 音质降级链 + 重试 + 刮削，
+很容易触发——表现就是运行历史里大量曲目状态 skipped、错误全是下载超时。
+
+修复与刮削侧同构：新增 `_timed(i, tr, job_id)` 包装，worker 真正开始执行时在
+`run_start[i]` 打点（带锁），超时判定改看该时间戳，结束后移除；
+`elif ... started[fut]` 改成 `else:` 分支内查 `run_start.get(i)`。
+回归测试 `TestErrors.test_queue_wait_not_counted_as_timeout`：并发 1 + 超时 1s +
+每首 1.5s 的两首歌，必须 2 首全 `downloaded`、0 `skipped`。
+
+> 教训：任何「提交即打点 + 手动巡检判超时」的组合，在批量任务里都会误杀队列。
+> 两处（刮削 / 下载）已统一为「执行即打点」。
+
+

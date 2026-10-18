@@ -404,6 +404,35 @@ class TestDegradation:
         job = core.db().execute("SELECT * FROM download_job WHERE title='要下的歌'").fetchone()
         assert job["status"] == "skipped" and "boom" in job["error"]
 
+    def test_queue_wait_not_counted_as_timeout(self, env, task):
+        """排队等待不计入单首超时：并发 1 时第 2 首排队 1.5s 不能被 1s 超时线误杀。
+
+        回归推送下载「大批歌被判下载超时」的 bug——超时起点曾是提交时刻，
+        一张歌单几十首排队时，后面的歌还没轮到执行就被批量记超时跳过。
+        """
+        core.kv_set("targets", {"navidrome": {"url": "", "enabled": False},
+                                "feiniu": {"enabled": False}})
+        core.kv_set("download", {"concurrency": 1, "track_timeout": 1, "stall_timeout": 600,
+                                 "retry": 0})
+
+        tracks = [{"title": f"排队歌{i}", "artist": "甲", "album": "A"} for i in range(2)]
+        pls = [{"id": "P1", "name": "排队歌单", "cover": "", "tracks": tracks}]
+
+        def slow_resolve(title, artist="", album="", sid=None):
+            time.sleep(1.5)
+            return {"status": "downloaded", "path": f"/music/{title}.mp3",
+                    "source": "主音源", "error": None,
+                    "meta": {"title": title, "artist": artist, "album": album}}
+
+        with mock.patch.object(recommender, "generate_playlists", return_value=pls), \
+             mock.patch.object(resolver, "resolve_track", side_effect=slow_resolve), \
+             mock.patch.object(scraper, "scrape",
+                               return_value={"tags": True, "cover": True, "lrc": True}):
+            run_id = pipeline.run_task(task)
+
+        rp = core.db().execute("SELECT * FROM run_playlist WHERE run_id=?", (run_id,)).fetchone()
+        assert rp["downloaded"] == 2 and rp["skipped"] == 0
+
     def test_missing_task_produces_no_run(self, env):
         assert pipeline.run_task(999) is None
         assert core.db().execute("SELECT COUNT(*) c FROM fetch_run").fetchone()["c"] == 0
