@@ -240,10 +240,11 @@ def test_search_mb_retries_503(monkeypatch):
 
 
 def test_source_registration():
-    assert set(songmeta.SOURCE_SEARCH) == {"wy", "tx", "kg", "kw", "ap", "mb"}
-    assert songmeta.DEFAULT_ORDER == ["wy", "tx", "kg", "kw", "ap", "mb"]
-    # 苹果与开放库没有公开 lrc 接口，不该出现在歌词换源表里
+    assert set(songmeta.SOURCE_SEARCH) == {"wy", "tx", "kg", "kw", "ap", "dg", "mb"}
+    assert songmeta.DEFAULT_ORDER == ["wy", "tx", "kg", "kw", "ap", "dg", "mb"]
+    # 苹果、Discogs 与开放库没有公开 lrc 接口，不该出现在歌词换源表里
     assert "ap" not in songmeta.SOURCE_LRC and "mb" not in songmeta.SOURCE_LRC
+    assert "dg" not in songmeta.SOURCE_LRC
 
 
 # ───────────────────────────── merge_sources 字段级合并

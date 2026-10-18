@@ -573,11 +573,13 @@ tunesync/
 
 **健康与统计**：后台探活（默认 30 分钟，`probe_keyword` 固定关键词）+ 下载结果回写；`fail_count` 连续失败达 `fail_threshold`（默认 8）熔断；`ok_count/err_count` 只增不减算历史成功率，仪表盘与音源管理按成功率降序展示，最近错误单行省略+悬浮全显。
 
-## 3.5 刮削六源合并（songmeta）
+## 3.5 刮削七源合并（songmeta）
 
-- `SOURCE_SEARCH = {wy, tx, kg, kw, ap, mb}`，`DEFAULT_ORDER` 同序；`SOURCE_LRC` 刻意不含 ap/mb（无公开歌词接口，合并时自然跳过）。
+- `SOURCE_SEARCH = {wy, tx, kg, kw, ap, dg, mb}`，`DEFAULT_ORDER` 同序；`SOURCE_LRC` 刻意不含 ap/dg/mb（无公开歌词接口，合并时自然跳过）。
+- **Discogs（dg）**：`GET api.discogs.com/database/search`（`artist`+`release_title`+`type=release`，匿名可用、合规 UA `TuneSync/1.0 +https://github.com/youze27/TuneSync`）；返回 `year/genres/styles/cover_image`——欧美曲库的年份与子流派主力源；发行版标题用查询词占位防 `_score` 判 0，`_pick(loose=True)` 匹配。国内四源（wy/tx/kg/kw）流派字段已全网下线、年份多数缺失，华语流派/年份主要靠 QQ 专辑接口 + AI 补全兜底。
 - **Apple Music（iTunes Search API）**：必须省略 `country`（`country=CN` 恒空）；华语走宽松匹配 `_pick(loose=True, min_score=0.9)`；`_loose_score` 逐字重合（≤2 字歌名放宽到 0.5，兼容简繁差一字）；**翻唱防线**：`_LIVEISH`（live/remix/karaoke/cover/伴奏/演唱会）与 `_artist_conflict`（拉丁查询撞中文候选=翻唱；中文查询撞拉丁候选=原版罗马字放行）各 -0.5 压到门槛下，同分 tie-break 取严格分高者。
 - **MusicBrainz**：UA 必须含项目名+联系 URL；限速 1 req/s，503 退避 1.5s 重试一次；`artist-credit/tags` 混有纯字符串需 isinstance 分支；CAA 封面响应是对象不是数组；release 取 date 最早者贴近原版年份；封面按专辑缓存。
+- **歌词链独立于 order**：平台 lrc 接口（命中源自带）→ **LRCLIB**（免 Key；三段式：带 album+duration 的 `/api/get` → 去 album 再 get → `/api/search` 前 8 条 `_pick(loose=True)` 校验防张冠李戴）→ **lyrics.ovh**（免 Key，`/v1/{artist}/{title}`，文本 >40 字符才算有效）。全链都空才报「所有数据源都没有歌词」。
 - **写标签**（scraper._write_tags）：FLAC 用 `add_picture()` 原生图片块；Ogg/Oga 用 `metadata_block_picture` base64 惯例；`.opus` 用 `OggOpus` 类打开。
 - **统计口径**：`scan_library` 用 `ON CONFLICT(path) DO UPDATE`（保留 `scraped_at/lyrics`，否则增量扫描会冲掉已刮标记）；`scrape_candidates` scope=missing = 缺任一字段（genre/year=0/cover/lyrics/scraped_at），每行带 `todo`。
 
@@ -588,11 +590,11 @@ tunesync/
 - **下载重试**：`download.retry`（默认 2 = 共尝试 3 次），间隔 2s/4s 递增；最终失败 error 记「重试 N 次仍失败：原因」。
 - **空候选预检**：刮削 run 前无候选直接 400「没有待刮削的文件」；前端轮询连续失败 ≥4 次才停（防网络抖动误判）。
 
-**手动刮削入口**：`POST /api/scrape/run` 只接 `{scope, limit}`，**一律按范围+上限全量跑，不支持挑选子集**；前端候选清单只读展示（可筛选 全部/待补/已补全），不再有勾选修改功能——勾几首跑几首的「部分刮削」已删除。
+**手动刮削入口**：`POST /api/scrape/run` 只接 `{scope, limit}`，**点开始即按范围+上限全量并发跑，全自动不支持挑选子集**——前端「候选预览/待刮削清单」界面已删除，缺口大小看顶部统计卡片；`GET /scrape/candidates` 端点保留（预检与统计口径用）。
 
 ## 3.7 定时刮削（auto_scrape）
 
-`scraper.auto_scrape = {enabled, cron, limit}`（默认 `0 4 * * *`、500 首）：scheduler 启动与 `reload_config()` 都重建 `auto-scrape` job；运行中或无候选时自动跳过。手动刮削的运行选项（`manual_scope/manual_limit/preview_limit`）同样持久化在 scraper 节，前端「先保存再运行」保证所见即所跑。
+`scraper.auto_scrape = {enabled, cron, limit}`（默认 `0 4 * * *`、500 首）：scheduler 启动与 `reload_config()` 都重建 `auto-scrape` job；运行中或无候选时自动跳过。手动刮削的运行选项（`manual_scope/manual_limit`）同样持久化在 scraper 节，前端「先保存再运行」保证所见即所跑。
 
 ## 3.8 LLM 连通测试
 
@@ -645,7 +647,7 @@ NAS：  docker compose up -d --build   # 自包含构建，pull_policy: never
     │   ├── recommender.py       # LLM 生成/筛选（OpenAI 兼容，override 先测后存）
     │   ├── resolver.py          # 本地索引 + 音源解析下载 + 刮削执行 + 音源统计
     │   ├── scraper.py           # 标签/封面/歌词写入（mutagen，FLAC/Ogg/Opus）
-    │   ├── songmeta.py          # 六源元数据搜索与合并（wy/tx/kg/kw/ap/mb）
+    │   ├── songmeta.py          # 七源元数据搜索与合并（wy/tx/kg/kw/ap/dg/mb）+ LRCLIB/lyrics.ovh 歌词链
     │   ├── platforms.py         # 五平台歌单广场游客客户端 + parse_link
     │   ├── lxbridge.py          # LX 脚本沙箱桥（Node 子进程行协议）
     │   ├── lx/lx_runner.js      # 沙箱 runner（currentScriptInfo / 容错）
@@ -720,4 +722,44 @@ NAS：  docker compose up -d --build   # 自包含构建，pull_policy: never
 「每场景歌单数」禁用（合并=所有场景候选一次送审，`_scene_rounds` 合成一轮、
 `select_playlists` 按综合主题一次挑完，数量由模型统一分配）。后端逻辑 3.3 已有，
 本次只是前端接通。
+
+## 3.16 第 14 轮修订（2026-10-18）
+
+### 刮削页全自动（删除候选预览/待刮削清单）
+
+- 前端 Scrape.vue 删除「候选预览」表单项（previewLimit+载入候选按钮）与「待刮削清单」
+  整卡（statusFilter 过滤组+只读表格）：点开始就按「刮削范围 + 数量上限」全量并发跑，
+  无中间确认步骤；缺口大小看顶部统计卡片（缺流派/年份/封面/歌词四格）。
+- 连带清理：`previewLimit/candidates/statusFilter/countTodo/countDone/shownRows/
+  loadCandidates` 状态与函数、`paramsPayload/fillForm` 里的 `preview_limit`、
+  `.head-filter` 样式、Search 图标 import；`load()` 不再并发拉候选清单。
+- 后端 `GET /scrape/candidates` 端点保留（`/scrape/run` 空任务预检 + 统计口径同源），
+  `resolver.scrape_candidates/scrape_files/scrape_async` 签名去掉了上一轮遗留的
+  `paths` 形参（原本就只支持全量，参数是误导）；测试 fake 签名同步对齐。
+
+### 新刮削源：Discogs + LRCLIB 三段式 + lyrics.ovh（songmeta）
+
+针对「缺流派 5951 / 缺年份 1462 / 缺封面 9411 / 缺歌词 8983 长期不降」：
+
+- **根因**：国内四源（wy/tx/kg/kw）的流派字段已全网下线（网易云 genres 下线、
+  酷狗 FileTag 下线、酷我无流派/年份），华语流派/年份基本无源可刮；歌词
+  LRCLIB 旧实现 `/api/get` 参数过严（album+duration 全要，缺一 404）且 search
+  无校验；欧美年份/流派此前只有 MusicBrainz（1 req/s、中文收录差）。
+- **Discogs（dg）**：加进 `SOURCE_SEARCH` 与默认 `order=[wy,tx,kg,kw,ap,dg,mb]`，
+  补欧美的 year/genres/styles/cover（子流派粒度最可靠的开放库，匿名可用）。
+- **LRCLIB 三段式**：带 album+duration 的 `/api/get` → 去 album 再 get →
+  `/api/search` 前 8 条 `_pick(loose=True)` 校验取词（防翻唱/现场版张冠李戴）。
+- **lyrics.ovh**：歌词链末位兜底（免 Key，`len>40` 才算有效）。合并时歌词命中源
+  标记 `lrclib`/`ovh`，与平台源区分。
+- 歌词链独立于 `scraper.order`：命中源平台 lrc → LRCLIB → lyrics.ovh，
+  全空才记「所有数据源都没有歌词」。华语流派/年份的剩余大头由上一轮的
+  AI 元数据补全兜底。
+
+### 稳定性确认（无需改码）
+
+`resolver.scrape_files` 已具备全套机制：并发 worker（`scraper.concurrency`，
+默认上限 8）、单首超时 `track_timeout`（180s）记失败跳过、停滞看门狗
+`stall_timeout`（600s）整体卡死时终止剩余并收尾、`_scrape_one` 异常全收敛、
+每首完成即 emit `scrape_progress`（进度条 1.5s 轮询 + WS 实时）。前端刮削范围
+说明文案同步标注这些行为。
 

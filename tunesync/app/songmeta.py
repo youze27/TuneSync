@@ -586,7 +586,12 @@ def mb_cover(release_id):
 # ---------------------------------------------------------------- LRC Lib
 
 def lrc_lrclib(title, artist, album="", duration=0):
-    """LRC Lib 免费歌词库（欧美/日韩为主），有时长校验，避免张冠李戴。"""
+    """LRC Lib 免费歌词库（欧美/日韩为主）。
+
+    /api/get 要求完整 track signature，参数一严就 404；先精确再模糊：
+    1) 带 album/duration 的 /api/get（唯一可能给逐词同步歌词的路径）
+    2) /api/search 模糊搜，候选按 _score 校验后取词，防止张冠李戴
+    """
     kw = {"track_name": title, "artist_name": artist}
     if album:
         kw["album_name"] = album
@@ -599,12 +604,81 @@ def lrc_lrclib(title, artist, album="", duration=0):
             for key in ("syncedLyrics", "plainLyrics"):
                 if _clean(j.get(key)):
                     return _clean(j[key])
-        r = requests.get("https://lrclib.net/api/search", params=kw, headers=_KW_H, timeout=TIMEOUT)
-        if r.status_code == 200:
-            for item in (r.json() or [])[:3]:
+        # 精确匹配失败（时长/专辑对不上）就去掉 album 再试一次
+        if album:
+            kw.pop("album_name", None)
+            kw.pop("duration", None)
+            r = requests.get("https://lrclib.net/api/get", params=kw,
+                             headers=_KW_H, timeout=TIMEOUT)
+            if r.status_code == 200:
+                j = r.json() or {}
                 for key in ("syncedLyrics", "plainLyrics"):
-                    if _clean(item.get(key)):
-                        return _clean(item[key])
+                    if _clean(j.get(key)):
+                        return _clean(j[key])
+        r = requests.get("https://lrclib.net/api/search", params=kw,
+                         headers=_KW_H, timeout=TIMEOUT)
+        if r.status_code == 200:
+            items = (r.json() or [])[:8]
+            best = _pick([{"title": it.get("track_name"), "artist": it.get("artist_name")}
+                          for it in items], title, artist, loose=True)
+            if best is not None:
+                it = next((x for x in items
+                           if x.get("track_name") == best.get("title")
+                           and x.get("artist_name") == best.get("artist")), items[0])
+                for key in ("syncedLyrics", "plainLyrics"):
+                    if _clean(it.get(key)):
+                        return _clean(it[key])
+    except (requests.RequestException, ValueError):
+        pass
+    return ""
+
+
+# ---------------------------------------------------------------- Discogs
+
+# Discogs：官方开放 API，搜索端点匿名可用（建议 PAT 提限额，这里走匿名+合规 UA）。
+# 年份与子风格（styles）粒度最可靠的开放库；封面 cover_image 直接可用；
+# 华语收录有限 → 主要补欧美曲目的年份/流派/风格/封面。
+_DG_H = {"User-Agent": "TuneSync/1.0 +https://github.com/youze27/TuneSync",
+         "Accept": "application/json"}
+
+
+def search_dg(title, artist):
+    r = requests.get("https://api.discogs.com/database/search",
+                     params={"artist": artist, "release_title": title,
+                             "type": "release", "per_page": 5},
+                     headers=_DG_H, timeout=TIMEOUT)
+    r.raise_for_status()
+    rows = []
+    for rel in (r.json() or {}).get("results") or []:
+        rows.append({
+            # Discogs 返回的是发行版标题而非单曲名，匹配分只要求歌手对得上
+            # （loose 路径），标题用查询词占位避免被 _score 判 0 分
+            "title": title,
+            "artist": _clean(rel.get("artist") or artist),
+            "album": _clean(rel.get("title")),
+            "genre": "; ".join((rel.get("genre") or [])[:2]),
+            "style": "; ".join((rel.get("style") or [])[:2]),
+            "year": year_of(rel.get("year")),
+            "cover": rel.get("cover_image") or rel.get("thumb") or "",
+            "platform": "dg",
+        })
+    return _pick(rows, title, artist, loose=True)
+
+
+# ---------------------------------------------------------------- 歌词库 lyrics.ovh
+
+def lrc_ovh(artist, title):
+    """lyrics.ovh：极简免 Key 歌词兜底，纯文本无时间轴（LRCLIB 之后再试）。"""
+    from urllib.parse import quote
+    if not artist or not title:
+        return ""
+    try:
+        r = requests.get(f"https://api.lyrics.ovh/v1/{quote(artist)}/{quote(title)}",
+                         headers=_KW_H, timeout=TIMEOUT)
+        if r.status_code == 200:
+            text = _clean((r.json() or {}).get("lyrics") or "")
+            # 太短的多半是 404 页文案或占位
+            return text if len(text) > 40 else ""
     except (requests.RequestException, ValueError):
         pass
     return ""
@@ -613,21 +687,23 @@ def lrc_lrclib(title, artist, album="", duration=0):
 # ---------------------------------------------------------------- 合并
 
 SOURCE_SEARCH = {"wy": search_wy, "tx": search_tx, "kg": search_kg, "kw": search_kw,
-                  "ap": search_ap, "mb": search_mb}
-# 每源搜索命中后拿哪个字段去换歌词（苹果与 MusicBrainz 没有公开 lrc 接口）
+                  "ap": search_ap, "dg": search_dg, "mb": search_mb}
+# 每源搜索命中后拿哪个字段去换歌词（苹果/开放库/Discogs 没有公开 lrc 接口）
 SOURCE_LRC_KEY = {"wy": "sid", "tx": "songmid", "kg": "hash"}
 SOURCE_LRC = {"wy": lrc_wy, "tx": lrc_tx, "kg": lrc_kg}
 # 苹果字段最全（专辑/流派/年份/封面一次到位），但华语要靠宽松匹配，
-# 排在国内三源之后当主力补手；MusicBrainz 中文基本没有，放最后兜底欧美日韩。
-DEFAULT_ORDER = ["wy", "tx", "kg", "kw", "ap", "mb"]
-FIELDS = ("album", "genre", "year", "cover")
+# 排在国内三源之后当主力补手；Discogs 补欧美的年份/子风格/封面；
+# MusicBrainz 中文基本没有，放最后兜底欧美日韩。
+DEFAULT_ORDER = ["wy", "tx", "kg", "kw", "ap", "dg", "mb"]
+FIELDS = ("album", "genre", "style", "year", "cover")
 
 
 def merge_sources(title, artist, order=None, want_lrc=True, log=None):
-    """多源搜索并字段级合并，返回 album/genre/year/cover/lrc 及命中溯源。
+    """多源搜索并字段级合并，返回 album/genre/style/year/cover/lrc 及命中溯源。
 
     order 形如 ["wy","tx","kg","kw"]，按序尝试；先命中的源先占字段，
     后续源只补空缺。任何单源异常都被吞掉记进 log，不影响整体。
+    歌词链独立于 order：平台 lrc 接口（按命中源）→ LRCLIB → lyrics.ovh。
     """
     order = [p for p in (order or DEFAULT_ORDER) if p in SOURCE_SEARCH]
     out = {k: "" for k in FIELDS}
@@ -701,6 +777,11 @@ def merge_sources(title, artist, order=None, want_lrc=True, log=None):
             if out["lrc"]:
                 out["hits"]["lrc"] = "lrclib"
                 log.append(f"LRC Lib 歌词命中 {len(out['lrc'])} 字节")
-            else:
-                log.append("所有数据源都没有歌词")
+        if not out["lrc"]:
+            out["lrc"] = lrc_ovh(artist, title)
+            if out["lrc"]:
+                out["hits"]["lrc"] = "ovh"
+                log.append(f"lyrics.ovh 歌词命中 {len(out['lrc'])} 字节")
+        if not out["lrc"]:
+            log.append("所有数据源都没有歌词")
     return out

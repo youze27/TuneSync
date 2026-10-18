@@ -97,23 +97,14 @@
               </el-radio-group>
               <div class="muted tip">
                 「只补缺失字段」优先跑流派/年份/封面/歌词还有缺口的文件，已补全的不重复跑；
-                「全库重来」重新读一遍所有文件，量大时很慢
+                「全库重来」重新读一遍所有文件。点开始即按范围全量并发刮削：
+                多线程同时跑、单首超时自动跳过、卡住的任务由看门狗兜底，无需人工干预
               </div>
             </el-form-item>
 
             <el-form-item label="数量上限">
               <el-input-number v-model="runLimit" :min="0" :max="20000" :step="100" controls-position="right" />
               <span class="muted" style="margin-left: 10px; font-size: 12px">0 = 不限，全按范围跑</span>
-            </el-form-item>
-
-            <el-form-item label="候选预览">
-              <el-input-number v-model="previewLimit" :min="1" :max="1000" :step="50" controls-position="right" />
-              <el-button style="margin-left: 10px" :icon="Search" :loading="loading" @click="loadCandidates">
-                载入候选
-              </el-button>
-              <div class="muted tip">
-                清单只读、先看缺口；点开始就按上面的「范围 + 上限」全部跑
-              </div>
             </el-form-item>
 
             <el-form-item>
@@ -205,50 +196,6 @@
             </el-collapse>
           </div>
         </el-card>
-
-        <el-card shadow="never">
-          <template #header>
-            <div class="card-head">
-              <span class="card-title">待刮削清单</span>
-              <!-- 借鉴 music-meta-web：列表上方按状态过滤，先看清缺口再决定刮哪些 -->
-              <div class="head-filter">
-                <el-radio-group v-model="statusFilter" size="small">
-                  <el-radio-button value="all">全部 {{ candidates.length }}</el-radio-button>
-                  <el-radio-button value="todo">待补 {{ countTodo }}</el-radio-button>
-                  <el-radio-button value="done">已补全 {{ countDone }}</el-radio-button>
-                </el-radio-group>
-                <span class="muted" style="font-size: 12px">
-                  {{ shownRows.length }} 条{{ candidates.length >= previewLimit ? `（预览上限 ${previewLimit}）` : '' }}
-                </span>
-              </div>
-            </div>
-          </template>
-
-          <el-table
-            v-loading="loading"
-            :data="shownRows"
-            row-key="path"
-            size="small"
-            border
-            stripe
-            height="calc(100vh - 620px)"
-          >
-            <el-table-column prop="title" label="歌名" min-width="150" show-overflow-tooltip />
-            <el-table-column prop="artist" label="歌手" min-width="110" show-overflow-tooltip />
-            <el-table-column label="状态" width="90" align="center">
-              <template #default="{ row }">
-                <el-tag v-if="row.todo" size="small" type="warning" effect="plain">待补</el-tag>
-                <el-tag v-else size="small" type="success" effect="plain">已补全</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="path" label="路径" min-width="240" show-overflow-tooltip class-name="mono" />
-            <template #empty>
-              <span class="muted">
-                {{ stats.total ? '这个范围下没有待刮削的文件' : '本地索引还是空的，先到「本地乐库」扫描一次' }}
-              </span>
-            </template>
-          </el-table>
-        </el-card>
       </el-col>
 
       <!-- 右：刮削参数 -->
@@ -273,7 +220,8 @@
               </div>
               <div class="muted tip">
                 按勾选先后顺序依次搜索，逐字段合并：先拿到的字段不会被后面的源覆盖。
-                流派与年份只有 QQ 音乐专辑接口稳定提供，建议保留它；全部取消则只靠下载时平台自带的信息
+                华语流派/年份主要靠 QQ 音乐专辑接口；Discogs 补欧美的流派/风格/年份。
+                歌词独立成链：平台 lrc 接口 → LRCLIB → lyrics.ovh，不在这份勾选里
               </div>
             </el-form-item>
 
@@ -415,7 +363,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Check, Cpu, MagicStick, Refresh, RefreshLeft, Search, Setting, Timer, VideoPlay,
+  Check, Cpu, MagicStick, Refresh, RefreshLeft, Setting, Timer, VideoPlay,
 } from '@element-plus/icons-vue'
 import * as api from '../api.js'
 
@@ -446,12 +394,13 @@ const SOURCES = [
   { key: 'kg', name: '酷狗音乐', fields: '专辑 / 封面 / 歌词' },
   { key: 'kw', name: '酷我音乐', fields: '专辑' },
   { key: 'ap', name: 'Apple Music', fields: '专辑 / 流派 / 年份 / 封面' },
+  { key: 'dg', name: 'Discogs 开放库', fields: '流派 / 风格 / 年份 / 封面（欧美主力）' },
   { key: 'mb', name: 'MusicBrainz 开放库', fields: '专辑 / 流派 / 年份 / 封面（欧美日韩兜底）' },
 ]
 const SRC_NAME = Object.fromEntries(SOURCES.map((s) => [s.key, s.name]))
 const srcLabel = (k) => SRC_NAME[k] || k
 
-const DEFAULT_ORDER = ['wy', 'tx', 'kg', 'kw', 'ap', 'mb']
+const DEFAULT_ORDER = ['wy', 'tx', 'kg', 'kw', 'ap', 'dg', 'mb']
 
 const form = reactive({
   order: [...DEFAULT_ORDER],
@@ -480,7 +429,6 @@ function fillForm(s = {}) {
   // 运行选项也持久化在 scraper 节里，换浏览器/设备不丢
   scope.value = sc.manual_scope === 'all' ? 'all' : 'missing'
   runLimit.value = Number(sc.manual_limit) || 0
-  previewLimit.value = Number(sc.preview_limit) || 200
 }
 
 /** 保存载荷：参数 + 运行选项一起入库，保证「所见即所跑」。 */
@@ -493,7 +441,6 @@ function paramsPayload() {
       concurrency: form.concurrency,
       manual_scope: scope.value,
       manual_limit: runLimit.value,
-      preview_limit: previewLimit.value,
       auto_scrape: { enabled: auto.enabled, cron: auto.cron, limit: auto.limit },
     },
   }
@@ -525,19 +472,6 @@ async function resetForm() {
 
 const scope = ref('missing')
 const runLimit = ref(0)
-const previewLimit = ref(200)
-const candidates = ref([])
-
-// 清单状态过滤（借鉴 music-meta-web 的顶部过滤器），纯前端切片，不重新请求
-// todo 由后端按「缺任一字段」算好，与统计口径同源，避免两边对不上
-const statusFilter = ref('all')
-const countTodo = computed(() => candidates.value.filter((r) => r.todo).length)
-const countDone = computed(() => candidates.value.length - countTodo.value)
-const shownRows = computed(() => {
-  if (statusFilter.value === 'todo') return candidates.value.filter((r) => r.todo)
-  if (statusFilter.value === 'done') return candidates.value.filter((r) => !r.todo)
-  return candidates.value
-})
 
 // 进度：轮询 /scrape/status 拿，逐首明细在 logs 里
 const runState = reactive({
@@ -578,19 +512,6 @@ const startLabel = computed(() => {
   if (runLimit.value) return `刮削 ${runLimit.value} 首`
   return scope.value === 'all' ? '刮削全库' : '刮削全部待补文件'
 })
-
-async function loadCandidates() {
-  loading.value = true
-  try {
-    const res = await api.getScrapeCandidates({ scope: scope.value, limit: previewLimit.value })
-    candidates.value = res?.items || []
-    applyStats(res?.stats)
-  } catch (e) {
-    api.toastError(e, '载入待刮削清单失败')
-  } finally {
-    loading.value = false
-  }
-}
 
 async function run() {
   if (scope.value === 'all') {
@@ -647,7 +568,7 @@ function poll() {
       pollFails = 0
       const finished = runState.running && !s?.running
       applyStatus(s)
-      // 刚跑完：概览和候选清单都变了，拉一次最新的
+      // 刚跑完：概览统计变了，拉一次最新的
       if (finished) {
         stopPolling()
         // 后端空任务兜底会把 total 落成 0，这里明确告诉用户为什么没动静
@@ -696,9 +617,7 @@ async function load() {
     applyStats(st)
     applyStatus(run)
     if (run?.running) startPolling()
-    // 参数与候选一起拿：进页面就该看到当前配置和可刮的曲子
-    const [s] = await Promise.all([api.getSettings(), loadCandidates()])
-    fillForm(s)
+    fillForm(await api.getSettings())
   } catch (e) {
     api.toastError(e, '加载刮削数据失败')
   } finally {
@@ -772,11 +691,6 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-}
-.head-filter {
-  display: flex;
-  align-items: center;
   gap: 10px;
 }
 .card-title {

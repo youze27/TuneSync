@@ -86,13 +86,17 @@ download:
 # ── 刮削 ──────────────────────────────────────────────
 scraper:
   # 元数据来源优先级，逐源搜索后按字段合并（谁先给就用谁）
-  # wy=网易云  tx=QQ音乐  kg=酷狗  kw=酷我  ap=Apple Music  mb=MusicBrainz 开放库
-  # 前四源是华语主力，ap 字段最全（专辑/流派/年份/封面一次到位）但华语要靠宽松匹配，
-  # 排在国内三源之后补手；mb 中文基本没有，放最后兜底欧美日韩（限速 1 req/s，别往前提）
-  order: [wy, tx, kg, kw, ap, mb]
+  # wy=网易云  tx=QQ音乐  kg=酷狗  kw=酷我  ap=Apple Music
+  # dg=Discogs（欧美年份/子风格/封面最可靠的开放库，华语收录有限）
+  # mb=MusicBrainz 开放库
+  # 前四源是华语主力；ap 字段最全（专辑/流派/年份/封面一次到位）但华语要靠宽松匹配；
+  # dg 专补欧美的年份/流派/风格/封面；mb 中文基本没有，放最后兜底（限速 1 req/s，别往前提）
+  # 缺流派/年份的大头（华语）靠「刮削页 · AI 元数据补全」兜底：线上源拿不到的交给模型
+  order: [wy, tx, kg, kw, ap, dg, mb]
   embed_cover: true                # 封面内嵌 + 同目录 cover.jpg
   save_lrc: true                   # 生成同名 .lrc
   concurrency: 6                   # 手动刮削并发（上限 8）
+  # 歌词链独立于 order：命中源的平台 lrc 接口 → LRCLIB（免 Key）→ lyrics.ovh（免 Key）
 
 # ── 歌单命名 ──────────────────────────────────────────
 naming:

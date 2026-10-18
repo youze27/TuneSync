@@ -1433,7 +1433,7 @@ class TestScrapeRun:
         _seed_local_files(library)
         seen = {}
 
-        def fake_files(paths=None, scope="missing", limit=0):
+        def fake_files(scope="missing", limit=0):
             seen["scope"] = scope
             resolver._set_scrape(running=False, ended_at=resolver.now(),
                                  total=1, done=1, ok=1)
@@ -1448,15 +1448,13 @@ class TestScrapeRun:
         assert seen.get("scope") == "all"
 
     def test_run_options_persisted(self, client, library):
-        """刮削范围/数量上限/预览上限随 scraper 节入库，换浏览器不丢。"""
+        """刮削范围/数量上限随 scraper 节入库，换浏览器不丢。"""
         r = client.put("/api/settings", json={"scraper": {"manual_scope": "all",
-                                                          "manual_limit": 50,
-                                                          "preview_limit": 300}})
+                                                          "manual_limit": 50}})
         assert r.status_code == 200
         sc = client.get("/api/settings").json()["scraper"]
         assert sc["manual_scope"] == "all"
         assert sc["manual_limit"] == 50
-        assert sc["preview_limit"] == 300
 
     def test_candidates_todo_flag(self, client, library):
         _seed_local_files(library)

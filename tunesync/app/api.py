@@ -1269,7 +1269,7 @@ def scrape_stats():
 
 @router.get("/scrape/candidates", tags=["刮削"])
 def scrape_candidates(scope: str = "missing", limit: int = 200):
-    """列出待刮削的文件，供界面预览与勾选。"""
+    """列出待刮削的文件（预检与统计用；前端已改为点开始直接全量跑）。"""
     limit = min(max(1, limit), 1000)
     return {"items": resolver.scrape_candidates(scope=scope, limit=limit),
             "stats": resolver.scrape_stats()}
@@ -1285,7 +1285,7 @@ class ScrapeRunIn(BaseModel):
 def scrape_run(body: ScrapeRunIn):
     """手动批量刮削，立即返回，进度走 WebSocket 或 /scrape/status 轮询。
 
-    一律按「范围 + 上限」全量跑，不支持挑选子集——前端候选清单只是预览。
+    一律按「范围 + 上限」全量跑，全自动不支持挑选子集。
     """
     # 先预检候选：空任务直接报错，而不是后台跑了个 0/0 的空转，
     # 用户侧表现成「点了开始没反应」

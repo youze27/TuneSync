@@ -994,19 +994,15 @@ def scrape_stats():
             "no_cover": r["no_cover"] or 0, "no_lrc": r["no_lrc"] or 0}
 
 
-def scrape_candidates(scope="missing", paths=None, limit=0):
+def scrape_candidates(scope="missing", limit=0):
     """挑出要手动刮削的文件。
 
-    scope：missing 缺任一字段（流派/年份/封面/歌词/没刮过）/ all 全库重来 / 按传入路径。
-    每行带 todo 布尔：True 表示仍有字段缺口。前端「待补」过滤与统计口径
-    都用它，避免「统计说缺几千个流派、清单却显示没得刮」的矛盾。
+    scope：missing 缺任一字段（流派/年份/封面/歌词/没刮过）/ all 全库重来。
+    每行带 todo 布尔：True 表示仍有字段缺口。统计口径与它一致，
+    避免「统计说缺几千个流派、清单却显示没得刮」的矛盾。
     """
     cols = "id,path,title,artist,scraped_at,genre,year,cover,lyrics"
-    if paths:
-        rows = db().execute(
-            f"SELECT {cols} FROM local_file "
-            f"WHERE path IN ({','.join('?' * len(paths))})", paths).fetchall()
-    elif scope == "all":
+    if scope == "all":
         sql = f"SELECT {cols} FROM local_file ORDER BY id"
         rows = db().execute(sql + (f" LIMIT {int(limit)}" if limit else "")).fetchall()
     else:
@@ -1080,16 +1076,19 @@ def _scrape_one(row):
         return f"刮削异常：{str(e)[:180]}", info
 
 
-def scrape_files(paths=None, scope="missing", limit=0):
+def scrape_files(scope="missing", limit=0):
     """批量刮削：并发跑，边跑边回写索引并抛进度。
 
+    全自动，不支持挑选子集——点开始就按「范围 + 上限」整批跑。
+
     稳定机制（应对几千首的大库）：
+    - 并发 worker（scraper.concurrency，默认 6 上限 8）；
     - 单首超时 track_timeout（默认 180s）：超时的歌记失败跳过，不拖住整轮；
     - 停滞看门狗 stall_timeout（默认 600s）：长时间没有任何一首完成，
       判定卡死，剩余全部记超时失败并结束，前端不会永远转圈；
     - 每首的异常全部收敛成失败记录（见 _scrape_one），不会整轮崩掉。
     """
-    rows = scrape_candidates(scope, paths, limit)
+    rows = scrape_candidates(scope, limit=limit)
     total = len(rows)
     _set_scrape(running=True, done=0, total=total, ok=0, failed=0,
                 ended_at=None, errors=[], logs=[])
@@ -1196,21 +1195,21 @@ def scrape_files(paths=None, scope="missing", limit=0):
             "elapsed": round(time.time() - t0, 1)}
 
 
-def scrape_async(paths=None, scope="missing", limit=0):
+def scrape_async(scope="missing", limit=0):
     """后台跑刮削，避免同步请求占住线程直到超时。"""
     with _scrape_lock:
         if _scrape_state["running"]:
             raise RuntimeError("刮削任务正在运行")
         _scrape_state.update(running=True, done=0, total=0, ok=0, failed=0,
                              ended_at=None, errors=[], logs=[])
-    threading.Thread(target=_scrape_bg, args=(paths, scope, limit),
+    threading.Thread(target=_scrape_bg, args=(scope, limit),
                      name="scrape", daemon=True).start()
     return scrape_state()
 
 
-def _scrape_bg(paths, scope, limit):
+def _scrape_bg(scope, limit):
     try:
-        scrape_files(paths, scope, limit)
+        scrape_files(scope, limit=limit)
     except Exception as e:                      # noqa: BLE001
         # 异常必须落进状态里，否则前端只看到 running 卡死或 0/0，无从排查
         log_resolver.error("刮削任务异常：%s", e, exc_info=True)
