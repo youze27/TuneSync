@@ -277,7 +277,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ChatDotRound, Check, Connection, Download, FolderOpened, Lock, RefreshLeft, Tickets, Upload } from '@element-plus/icons-vue'
 import * as api from '../api.js'
-import { auth, boot, ensureSettings, state } from '../store.js'
+import { auth, boot, ensureSettings, invalidateSettings, state } from '../store.js'
 
 const NAMING_VARS = ['{category}', '{name}', '{platform}']
 const QUALITIES = ['flac', '320', '128', '96']
@@ -373,6 +373,8 @@ async function save() {
     // 保存前记下 Key 框内容：提交后会被掩码 *** 回填，能不能算「更新了 Key」只有现在知道
     const keyUpdated = Boolean(form.llm.api_key && form.llm.api_key !== '***')
     const res = await api.putSettings(body)
+    // 全局缓存里还存着保存前那份旧值，不清的话回到设置页看到的还是改之前的值
+    invalidateSettings()
     fillFromSettings(res)
     ElMessage.success(keyUpdated ? '全局设置已保存，API Key 已更新' : '全局设置已保存（API Key 保持不变）')
   } catch (e) {

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import os
 import threading
+import traceback
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,6 +74,24 @@ async def require_login(request, call_next):
     if _needs_login(request) and api.current_user(request) is None:
         return JSONResponse(status_code=401, content={"detail": "未登录或会话已过期"})
     return await call_next(request)
+
+
+# 注册顺序在 CORS 之前 → 实际执行时它被 CORS 包住，500 响应照样带 CORS 头。
+@app.middleware("http")
+async def unhandled_error_guard(request, call_next):
+    """把未捕获的异常翻译成能看懂的 500。
+
+    FastAPI 的默认兜底只回一句 "Internal Server Error"，前端 errText 只能显示
+    「接口返回 500」——用户看不到是哪一环炸的，排查全靠猜。这里把异常类型和
+    消息带回去，完整堆栈写进日志。
+    """
+    try:
+        return await call_next(request)
+    except Exception as e:
+        log_api.error(f"未处理异常 {request.method} {request.url.path}：{e}\n"
+                      f"{traceback.format_exc()}")
+        return JSONResponse(status_code=500, content={
+            "detail": f"服务器内部错误（{type(e).__name__}）：{e}"})
 
 
 app.add_middleware(

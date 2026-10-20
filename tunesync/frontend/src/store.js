@@ -348,6 +348,15 @@ export function ensureSettings(force = false) {
   return settingsPromise
 }
 
+/**
+ * 丢弃 settings 缓存。任何 PUT /api/settings 成功后都要调一次：
+ * 缓存里是保存前那份旧值，不清的话回到设置页会看到改之前的值，
+ * 看起来就像「保存没生效」。
+ */
+export function invalidateSettings() {
+  settingsPromise = null
+}
+
 export async function loadTasks() {
   state.tasks = (await api.getTasks()) || []
   return state.tasks

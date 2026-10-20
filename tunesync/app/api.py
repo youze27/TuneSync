@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import auth, lxbridge, pipeline, platforms, resolver, scheduler, writers
+from . import auth, lxbridge, pipeline, platforms, recommender, resolver, scheduler, writers
 from .core import (CATEGORIES, CATMAP, CONFIG, _apply_host, db, emit, host_alias,
                    kv_get, kv_set, log_api, merged_config, merged_targets, now,
                    running_in_container, source_cfg)
@@ -198,8 +198,6 @@ def test_llm(body: dict | None = None):
     前端把表单当前内容传上来，新 Key 不用先保存就能测（先测后存）。
     api_key 传 "***"/空/缺省都表示用已保存的 key。
     """
-    from . import recommender
-
     override = body if isinstance(body, dict) and body else None
     if not recommender.is_configured(override):
         raise HTTPException(400, "LLM 未配置：请先填写接口地址与模型")
@@ -948,7 +946,7 @@ class CleanupIn(BaseModel):
 @router.post("/playlists/cleanup", tags=["歌单管理"])
 def playlists_cleanup(body: CleanupIn):
     """按生成时间清理老旧歌单。dry_run=true 只返回将被删的清单，不动数据。"""
-    keep = body.keep_days or int(merged_config().get("playlist_cleanup", {}).get("keep_days", 30) or 30)
+    keep = body.keep_days or int(merged_config().get("playlist_cleanup", {}).get("keep_days", 180) or 180)
     return writers.cleanup_old_playlists(merged_targets(), keep,
                                          dry_run=body.dry_run, only_names=body.names)
 

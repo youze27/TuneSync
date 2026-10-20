@@ -366,6 +366,7 @@ import {
   Check, Cpu, MagicStick, Refresh, RefreshLeft, Setting, Timer, VideoPlay,
 } from '@element-plus/icons-vue'
 import * as api from '../api.js'
+import { invalidateSettings } from '../store.js'
 
 const loading = ref(false)
 const saving = ref(false)
@@ -450,6 +451,7 @@ async function save() {
   saving.value = true
   try {
     const res = await api.putSettings(paramsPayload())
+    invalidateSettings()
     fillForm(res)
     ElMessage.success('刮削参数已保存')
   } catch (e) {
@@ -530,6 +532,7 @@ async function run() {
   saving.value = true
   try {
     await api.putSettings(paramsPayload())
+    invalidateSettings()
   } catch (e) {
     api.toastError(e, '保存刮削参数失败，已取消本次刮削')
     saving.value = false

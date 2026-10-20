@@ -768,6 +768,54 @@ class TestSettings:
         r = client.put("/api/settings", json={"llm": body})
         assert r.status_code == 400 and msg in r.json()["detail"]
 
+    def test_playlist_cleanup_defaults_to_180_days(self, client):
+        """默认保留 180 天：UI 上「保留天数」空着时不能变成 30 天。"""
+        pc = client.get("/api/settings").json()["playlist_cleanup"]
+        assert pc["keep_days"] == 180
+        assert pc["enabled"] is True
+        assert pc["interval_min"] == 1440
+
+    def test_playlist_cleanup_is_persisted(self, client):
+        """改保留天数要真落库，换浏览器/重启都还在。"""
+        r = client.put("/api/settings", json={"playlist_cleanup": {
+            "enabled": False, "keep_days": 90, "interval_min": 60}})
+        assert r.status_code == 200
+        assert r.json()["playlist_cleanup"]["keep_days"] == 90
+
+        # 回读接口一致
+        got = client.get("/api/settings").json()["playlist_cleanup"]
+        assert got["keep_days"] == 90 and got["enabled"] is False
+        assert got["interval_min"] == 60
+
+        # 真正写进 kv 表（不是只存在内存里）
+        stored = core.kv_get("settings")["playlist_cleanup"]
+        assert stored["keep_days"] == 90 and stored["enabled"] is False
+
+    def test_playlist_cleanup_partial_update_keeps_others(self, client):
+        """只改一个字段不能让另一个字段被清掉。"""
+        client.put("/api/settings", json={"playlist_cleanup": {
+            "enabled": True, "keep_days": 180, "interval_min": 1440}})
+        client.put("/api/settings", json={"playlist_cleanup": {"keep_days": 30}})
+        pc = client.get("/api/settings").json()["playlist_cleanup"]
+        assert pc["keep_days"] == 30
+        assert pc["interval_min"] == 1440
+        assert pc["enabled"] is True
+
+    def test_cleanup_endpoint_uses_saved_keep_days(self, client, monkeypatch):
+        """手动清理没传 keep_days 时，要用设置里存的那份，而不是硬编码默认值。"""
+        client.put("/api/settings", json={"playlist_cleanup": {"keep_days": 77}})
+        seen = {}
+
+        def fake_cleanup(targets, keep, dry_run=False, only_names=None):
+            seen["keep"] = keep
+            seen["dry_run"] = dry_run
+            return {"total": 0, "deleted": [], "results": []}
+
+        monkeypatch.setattr(writers, "cleanup_old_playlists", fake_cleanup)
+        r = client.post("/api/playlists/cleanup", json={"dry_run": True})
+        assert r.status_code == 200
+        assert seen["keep"] == 77 and seen["dry_run"] is True
+
 
 class TestTestLlm:
     """LLM 连通测试：先测后存，覆盖值透传给 recommender，不落库。"""
@@ -1463,4 +1511,65 @@ class TestScrapeRun:
         assert items
         # 造的数据没有封面/歌词，全部应标 todo=True
         assert all(it["todo"] for it in items)
+
+    def test_ai_run_without_llm_returns_400_not_500(self, client, monkeypatch):
+        """LLM 没配时 ai-run 要说人话（400），不能炸成 500。
+
+        之前这里因为 api 模块漏 import recommender 而抛 NameError，
+        FastAPI 兜成 500，前端只看到一句「Internal Server Error」。
+        """
+        monkeypatch.setitem(core.CONFIG, "llm", {})
+        r = client.post("/api/scrape/ai-run", json={"scope": "missing"})
+        assert r.status_code == 400
+        assert "未配置" in r.json()["detail"]
+
+    def test_ai_run_uses_saved_llm_config(self, client, settings, monkeypatch):
+        """配好 LLM 后要能往下走（探针没有候选时给 400，不给 500）。"""
+        settings(llm={"base_url": "http://llm.local/v1", "api_key": "sk-x",
+                      "model": "test-model"})
+        monkeypatch.setattr(resolver, "ai_scrape_candidates", lambda scope, limit: [])
+        r = client.post("/api/scrape/ai-run", json={"scope": "missing"})
+        assert r.status_code == 400
+        assert "未配置" not in r.json()["detail"]
+
+    def test_ai_run_returns_200_when_candidates_exist(self, client, settings,
+                                                      monkeypatch):
+        """LLM 已配 + 库里有待补文件 → 200 起后台任务，不能是 500。
+
+        这是线上 `/api/scrape/ai-run` 报 500 的完整链路回归：模块级
+        recommender、探针查询、后台任务启动三段都得走通。
+        """
+        settings(llm={"base_url": "http://llm.local/v1", "api_key": "sk-x",
+                      "model": "test-model"})
+        seen = {}
+
+        def fake_candidates(scope="missing", limit=0):
+            return [(1, "/m/a.mp3", "A", "B", "C", "", "", 0, None)]
+
+        def fake_async(scope="missing", limit=0):
+            seen["scope"] = scope
+            seen["limit"] = limit
+            return {"running": True, "done": 0, "total": 1, "ok": 0, "failed": 0,
+                    "errors": [], "logs": [], "ended_at": None}
+
+        monkeypatch.setattr(resolver, "ai_scrape_candidates", fake_candidates)
+        monkeypatch.setattr(resolver, "ai_scrape_async", fake_async)
+        r = client.post("/api/scrape/ai-run", json={"scope": "missing", "limit": 20})
+        assert r.status_code == 200, r.text
+        assert seen == {"scope": "missing", "limit": 20}
+
+    def test_unhandled_exception_returns_readable_500(self, client, monkeypatch):
+        """没兜住的异常要回能看懂的 500，而不是裸的 Internal Server Error。
+
+        用户在浏览器里只能看到「接口返回 500」，排查全靠猜；这里把异常类型
+        和消息透到 detail 里（前端 errText 直接显示）。
+        """
+        def boom():
+            raise RuntimeError("测试用的炸点")
+
+        monkeypatch.setattr(resolver, "ai_scrape_state", boom)
+        r = client.get("/api/scrape/ai/status")
+        assert r.status_code == 500
+        detail = r.json()["detail"]
+        assert "RuntimeError" in detail and "测试用的炸点" in detail
 

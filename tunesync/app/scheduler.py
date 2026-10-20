@@ -66,7 +66,7 @@ def _cleanup_playlists():
     cfg = merged_config().get("playlist_cleanup") or {}
     if not cfg.get("enabled", True):
         return
-    keep = max(1, int(cfg.get("keep_days", 30) or 30))
+    keep = max(1, int(cfg.get("keep_days", 180) or 180))
     if not _cleanup_lock.acquire(blocking=False):
         return
     try:

@@ -122,6 +122,9 @@
       <template #footer>
         <el-button size="small" @click="cleanupVisible = false">关闭</el-button>
         <el-button size="small" :loading="busy" @click="runCleanup(true)">重新预览</el-button>
+        <el-button size="small" type="primary" :loading="savingCleanup" @click="saveCleanupSettings()">
+          保存设置
+        </el-button>
         <el-button size="small" type="danger" :disabled="!preview?.total" :loading="busy" @click="runCleanup(false)">
           确认删除
         </el-button>
@@ -135,6 +138,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Refresh } from '@element-plus/icons-vue'
 import { cleanupPlaylists, deleteTargetPlaylist, getPlaylistTargets, getSettings, getTargetPlaylists, putSettings, toastError } from '../api.js'
+import { invalidateSettings } from '../store.js'
 
 const targets = ref([])
 const target = ref('')
@@ -235,18 +239,20 @@ async function remove(row) {
 
 // ─────────── 定时清理
 const cleanupVisible = ref(false)
-const keepDays = ref(30)
+const keepDays = ref(180)
 const cleanupScope = ref('all')
 const autoEnabled = ref(false)
 const intervalMin = ref(1440)
 const busy = ref(false)
+const savingCleanup = ref(false)
 const preview = ref(null)
 
 async function openCleanup() {
   try {
+    // 直接 GET 一份最新，不走 store 的 settings 缓存（那是 boot 阶段的快照）
     const s = await getSettings()
     const c = s.playlist_cleanup || {}
-    keepDays.value = c.keep_days || 30
+    keepDays.value = c.keep_days || 180
     intervalMin.value = c.interval_min || 1440
     autoEnabled.value = c.enabled !== false
   } catch (e) {
@@ -255,6 +261,22 @@ async function openCleanup() {
   preview.value = null
   cleanupVisible.value = true
   runCleanup(true)
+}
+
+/** 只保存定时清理参数，不动任何歌单。 */
+async function saveCleanupSettings(showToast = true) {
+  savingCleanup.value = true
+  try {
+    await putSettings({
+      playlist_cleanup: { enabled: autoEnabled.value, keep_days: keepDays.value, interval_min: intervalMin.value },
+    })
+    invalidateSettings()
+    if (showToast) ElMessage.success('定时清理设置已保存')
+  } catch (e) {
+    toastError(e, '保存定时清理设置失败')
+  } finally {
+    savingCleanup.value = false
+  }
 }
 
 async function runCleanup(dryRun) {
@@ -267,14 +289,13 @@ async function runCleanup(dryRun) {
     preview.value = r
     if (dryRun) return
 
-    await putSettings({
-      playlist_cleanup: { enabled: autoEnabled.value, keep_days: keepDays.value, interval_min: intervalMin.value },
-    })
     const failed = (r.results || []).reduce((s, x) => s + (x.failed?.length || 0), 0)
     if (failed) ElMessage.warning(`已删除 ${r.total} 张，${failed} 张失败，详见下方列表`)
     else ElMessage.success(`已删除 ${r.total} 张老歌单`)
     await loadAll()
     preview.value = await cleanupPlaylists({ keep_days: keepDays.value, dry_run: true, names })
+    // 顺手把当前表单里的参数落库，避免下次进来又是旧值
+    await saveCleanupSettings(false)
   } catch (e) {
     toastError(e, dryRun ? '预览失败' : '清理失败')
   } finally {

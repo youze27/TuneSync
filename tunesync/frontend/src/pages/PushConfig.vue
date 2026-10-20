@@ -269,6 +269,7 @@ import {
   groupedCategories,
   loadDictionary,
   loadTasks,
+  invalidateSettings,
   normaliseSourcePlatforms,
   preferences,
   pushModeOf,
@@ -523,6 +524,7 @@ async function submit(runAfter) {
         source_platforms: body.source_platforms,
       },
     })
+    invalidateSettings()
 
     const saved = editing.value
       ? await api.updateTask(editing.value.id, body)
