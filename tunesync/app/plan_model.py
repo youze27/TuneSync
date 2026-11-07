@@ -167,30 +167,44 @@ def validate(plan):
 
 # ---------------------------------------------------------------- 触发引擎
 
+def _timezone():
+    import zoneinfo
+    try:
+        return zoneinfo.ZoneInfo(CONFIG.get("server", {}).get("timezone", "Asia/Shanghai"))
+    except Exception:
+        return None
+
+
 def build_trigger(cfg):
-    """把结构化触发配置变成 APScheduler trigger。"""
+    """把结构化触发配置变成 APScheduler trigger。
+
+    显式带上服务端时区，保证 CronTrigger 与 IntervalTrigger 返回的都是
+    aware datetime，预览计算不会出现 naive/aware 混比报错。
+    """
     t = normalize({"trigger": cfg})["trigger"]
     hh, mm = (int(x) for x in t["time"].split(":"))
+    z = _timezone()
+    kw = {"timezone": z} if z else {}
     kind = t["type"]
     if kind == "cron":
-        return CronTrigger.from_crontab(str(t["cron"]).strip())
+        return CronTrigger.from_crontab(str(t["cron"]).strip(), **kw)
     if kind == "daily":
-        return CronTrigger(hour=hh, minute=mm)
+        return CronTrigger(hour=hh, minute=mm, **kw)
     if kind == "weekly":
         return CronTrigger(day_of_week=",".join(str(x) for x in sorted(t["weekdays"])),
-                           hour=hh, minute=mm)
+                           hour=hh, minute=mm, **kw)
     if kind == "monthly":
         return CronTrigger(day=t["monthday"] if t["monthday"] == "last" else int(t["monthday"]),
-                           hour=hh, minute=mm)
+                           hour=hh, minute=mm, **kw)
     if kind == "hourly":
-        return CronTrigger(hour=f"*/{int(t['interval'])}", minute=mm)
+        return CronTrigger(hour=f"*/{int(t['interval'])}", minute=mm, **kw)
     if kind == "interval_days":
         anchor = t["anchor_date"] or date.today().isoformat()
         try:
             start = datetime.strptime(f"{anchor} {t['time']}", "%Y-%m-%d %H:%M")
         except ValueError:
             start = datetime.combine(date.today(), datetime.min.time()).replace(hour=hh, minute=mm)
-        return IntervalTrigger(days=max(1, int(t["interval"])), start_date=start)
+        return IntervalTrigger(days=max(1, int(t["interval"])), start_date=start, **kw)
     raise PlanError(f"未知触发类型：{kind}")
 
 
@@ -231,13 +245,13 @@ def derived_cron(cfg):
 def next_fires(cfg, count=5, tz=None):
     """未来 N 次触发时间（字符串列表）。
 
-    容器已按 server.timezone 设好 TZ，这里统一用本地 naive datetime，与未
-    显式指定时区的 trigger 保持一致。每次迭代必须把 now 推进到上次触发时刻：
-    CronTrigger 内部用 min(now, previous+1us) 取起点，now 不动的话会连续
-    算出同一个时间（曾经导致预览卡显示 5 行重复日期）。
+    build_trigger 已显式带时区，这里 now 也用同一时区的 aware datetime。
+    每次迭代必须把 now 推进到上次触发时刻：CronTrigger 内部用
+    min(now, previous+1us) 取起点，now 不动会连续算出同一个时间。
     """
     trig = build_trigger(cfg)
-    now = datetime.now()
+    z = _timezone()
+    now = datetime.now(z) if z else datetime.now()
     out, cur = [], None
     for _ in range(count):
         cur = trig.get_next_fire_time(cur, now)
