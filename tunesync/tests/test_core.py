@@ -151,12 +151,12 @@ class TestCronParsing:
         assert scheduler.parse_cron("30 0 8 * * *") is not None
 
     def test_seven_normalizes_to_sunday(self, env):
-        """Unix cron 里 7=周日，直接喂给 APScheduler 会 ValueError。"""
-        assert str(scheduler.parse_cron("0 8 * * 7")) == str(scheduler.parse_cron("0 8 * * 0"))
+        """Unix cron 里 7=周日；APScheduler 的周日是 6（0 是周一）。"""
+        assert str(scheduler.parse_cron("0 8 * * 7")) == str(scheduler.parse_cron("0 8 * * 6"))
 
     def test_seven_inside_list(self, env):
         assert scheduler.parse_cron("0 8 * * 7,1") is not None
-        assert str(scheduler.parse_cron("0 8 * * 7,1")) == str(scheduler.parse_cron("0 8 * * 0,1"))
+        assert str(scheduler.parse_cron("0 8 * * 7,1")) == str(scheduler.parse_cron("0 8 * * 6,1"))
 
     def test_full_week_uses_six_not_seven(self, env):
         """APScheduler 上限是 6，整周要写 0-6 或 *，写 1-7 会报错。"""

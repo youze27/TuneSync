@@ -7,6 +7,17 @@
       </div>
       <div class="toolbar">
         <el-button size="small" :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
+        <el-button
+          v-if="selection.length"
+          size="small"
+          type="danger"
+          plain
+          :icon="Delete"
+          :loading="batchDeleting"
+          @click="batchRemove"
+        >
+          删除选中 ({{ selection.length }})
+        </el-button>
         <el-button size="small" type="primary" :icon="Delete" @click="openCleanup">定时清理</el-button>
       </div>
     </div>
@@ -37,8 +48,16 @@
     </el-card>
 
     <el-card shadow="never" v-loading="loading">
-      <el-table :data="paged" size="small" style="width: 100%" empty-text="该目标下没有歌单">
-        <el-table-column type="selection" width="42" />
+      <el-table
+        ref="tableRef"
+        :data="paged"
+        row-key="id"
+        size="small"
+        style="width: 100%"
+        empty-text="该目标下没有歌单"
+        @selection-change="(rows) => (selection = rows)"
+      >
+        <el-table-column type="selection" width="42" reserve-selection />
         <el-table-column prop="name" label="歌单" min-width="240">
           <template #default="{ row }">
             <span class="break-all">{{ row.name || '(未命名)' }}</span>
@@ -94,7 +113,9 @@
         </el-form-item>
         <el-form-item label="定时执行">
           <el-switch v-model="autoEnabled" />
-          <span class="muted">　每 {{ intervalMin }} 分钟检查一次</span>
+          <span class="muted">　每</span>
+          <el-input-number v-model="intervalMin" :min="60" :max="10080" :step="60" controls-position="right" style="width: 140px" />
+          <span class="muted">分钟检查一次（默认关闭，开启后才会自动删歌单）</span>
         </el-form-item>
       </el-form>
 
@@ -125,7 +146,7 @@
         <el-button size="small" type="primary" :loading="savingCleanup" @click="saveCleanupSettings()">
           保存设置
         </el-button>
-        <el-button size="small" type="danger" :disabled="!preview?.total" :loading="busy" @click="runCleanup(false)">
+        <el-button size="small" type="danger" :disabled="!previewReady" :loading="busy" @click="runCleanup(false)">
           确认删除
         </el-button>
       </template>
@@ -137,7 +158,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Refresh } from '@element-plus/icons-vue'
-import { cleanupPlaylists, deleteTargetPlaylist, getPlaylistTargets, getSettings, getTargetPlaylists, putSettings, toastError } from '../api.js'
+import { batchDeletePlaylists, cleanupPlaylists, deleteTargetPlaylist, getPlaylistTargets, getSettings, getTargetPlaylists, putSettings, toastError } from '../api.js'
 import { invalidateSettings } from '../store.js'
 
 const targets = ref([])
@@ -149,6 +170,9 @@ const loading = ref(false)
 const error = ref('')
 const page = ref(1)
 const pageSize = 50
+const selection = ref([])
+const tableRef = ref(null)
+const batchDeleting = ref(false)
 
 const currentTarget = computed(() => targets.value.find((t) => t.key === target.value))
 const raw = computed(() => lists[target.value] || [])
@@ -162,9 +186,13 @@ const filtered = computed(() => {
 })
 const paged = computed(() => filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize))
 const totalTracks = computed(() => filtered.value.reduce((s, p) => s + (p.tracks || 0), 0))
-watch([keyword, sortBy, target], () => { page.value = 1 })
+watch([keyword, sortBy, target], () => {
+  page.value = 1
+  selection.value = []
+  tableRef.value?.clearSelection()
+})
 
-const ts = (p) => p.created || p.changed || 0
+const ts = (p) => Math.max(p.created || 0, p.changed || 0)
 
 const labelOf = (key) => targets.value.find((t) => t.key === key)?.name || key
 
@@ -237,6 +265,34 @@ async function remove(row) {
   }
 }
 
+/** 多选批量删除：一次请求删完，单张失败不影响其它。 */
+async function batchRemove() {
+  const rows = [...selection.value]
+  if (!rows.length) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${rows.length} 张歌单？该操作不可撤销（只删歌单，不动音乐文件）。`,
+      '批量删除歌单',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
+    )
+  } catch {
+    return
+  }
+  batchDeleting.value = true
+  try {
+    const r = await batchDeletePlaylists(target.value, rows.map((x) => x.id))
+    if (r.failed?.length) ElMessage.warning(`已删除 ${r.deleted} 张，${r.failed.length} 张失败`)
+    else ElMessage.success(`已删除 ${r.deleted} 张歌单`)
+    selection.value = []
+    tableRef.value?.clearSelection()
+    await loadAll()
+  } catch (e) {
+    toastError(e, '批量删除失败')
+  } finally {
+    batchDeleting.value = false
+  }
+}
+
 // ─────────── 定时清理
 const cleanupVisible = ref(false)
 const keepDays = ref(180)
@@ -246,6 +302,12 @@ const intervalMin = ref(1440)
 const busy = ref(false)
 const savingCleanup = ref(false)
 const preview = ref(null)
+// 预览时的参数指纹：任一参数变了就必须重新预览，
+// 避免「按 180 天预览、按 30 天真删」这种删到没预览过的歌单。
+const previewKey = ref('')
+const cleanupParams = () => `${keepDays.value}|${cleanupScope.value}|${target.value}`
+const previewReady = computed(() => Boolean(preview.value?.total) && previewKey.value === cleanupParams())
+watch([keepDays, cleanupScope, intervalMin, autoEnabled, target], () => { previewKey.value = '' })
 
 async function openCleanup() {
   try {
@@ -254,7 +316,9 @@ async function openCleanup() {
     const c = s.playlist_cleanup || {}
     keepDays.value = c.keep_days || 180
     intervalMin.value = c.interval_min || 1440
-    autoEnabled.value = c.enabled !== false
+    // 与后端默认值一致：默认关闭。旧写法 c.enabled !== false 会在配置缺失时
+    // 悄悄打开自动清理，把用户手工建的歌单也删掉。
+    autoEnabled.value = c.enabled === true
   } catch (e) {
     toastError(e, '读取清理设置失败')
   }
@@ -280,22 +344,40 @@ async function saveCleanupSettings(showToast = true) {
 }
 
 async function runCleanup(dryRun) {
+  const names = cleanupScope.value === 'current' && target.value
+    ? (lists[target.value] || []).map((p) => p.name)
+    : null
+  const onlyTarget = cleanupScope.value === 'current' ? target.value : null
+  if (!dryRun) {
+    if (previewKey.value !== cleanupParams()) {
+      ElMessage.warning('清理参数已改动，请重新预览后再删除')
+      return
+    }
+    try {
+      await ElMessageBox.confirm(
+        `将按「保留 ${keepDays.value} 天／${cleanupScope.value === 'current' ? '仅当前目标' : '全部目标'}」删除 ${preview.value?.total || 0} 张歌单，不可撤销。`,
+        '确认执行清理',
+        { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
+      )
+    } catch {
+      return
+    }
+  }
   busy.value = true
   try {
-    const names = cleanupScope.value === 'current' && target.value
-      ? (lists[target.value] || []).map((p) => p.name)
-      : null
-    const r = await cleanupPlaylists({ keep_days: keepDays.value, dry_run: dryRun, names })
+    const body = { keep_days: keepDays.value, dry_run: dryRun, names, target: onlyTarget }
+    const r = await cleanupPlaylists(body)
     preview.value = r
+    previewKey.value = cleanupParams()
     if (dryRun) return
 
     const failed = (r.results || []).reduce((s, x) => s + (x.failed?.length || 0), 0)
     if (failed) ElMessage.warning(`已删除 ${r.total} 张，${failed} 张失败，详见下方列表`)
     else ElMessage.success(`已删除 ${r.total} 张老歌单`)
     await loadAll()
-    preview.value = await cleanupPlaylists({ keep_days: keepDays.value, dry_run: true, names })
-    // 顺手把当前表单里的参数落库，避免下次进来又是旧值
-    await saveCleanupSettings(false)
+    preview.value = await cleanupPlaylists({ ...body, dry_run: true })
+    previewKey.value = cleanupParams()
+    // 不再顺手静默保存设置：开关与周期由「保存设置」按钮显式提交
   } catch (e) {
     toastError(e, dryRun ? '预览失败' : '清理失败')
   } finally {

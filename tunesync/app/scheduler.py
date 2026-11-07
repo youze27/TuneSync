@@ -18,8 +18,8 @@ _cleanup_lock = threading.Lock()
 
 import re
 
-# 星期字段：Unix cron 里 7 和 0 都表示周日，但 APScheduler 的上限是 6，直接传 7 会报错。
-# 这里把 7 归一成 0，其余编号沿用 APScheduler 的 0=周一。
+# 星期字段：Unix cron 里 7 表示周日；APScheduler 是 0=周一 … 6=周日。
+# 旧实现把 7 归一成 0，结果「周日」执行变成了「周一」，与帮助文案相反。
 _DOW7 = re.compile(r"(^|[\/,])7(?=$|[\/,])")
 
 
@@ -27,7 +27,7 @@ def parse_cron(expr):
     """接受 5 段（分 时 日 月 周）或 6 段（含秒）两种写法。
 
     注意星期字段沿用 APScheduler 编号：0=周一 … 6=周日。
-    常见的「7=周日」写法会被自动归一，Unix cron 的「0=周日」则是周一的含义。
+    常见的「7=周日」写法会被归一成 6；Unix cron 的「0=周日」在这里是周一。
     """
     expr = (expr or "").strip()
     parts = expr.split()
@@ -35,7 +35,7 @@ def parse_cron(expr):
         expr = " ".join(parts[1:])
     parts = expr.split()
     if len(parts) == 5:
-        parts[4] = _DOW7.sub(r"\g<1>0", parts[4])
+        parts[4] = _DOW7.sub(r"\g<1>6", parts[4])
         expr = " ".join(parts)
     return CronTrigger.from_crontab(expr)
 
@@ -64,7 +64,7 @@ def _probe_sources():
 def _cleanup_playlists():
     """按生成时间清掉老旧歌单。开关关着就直接返回，不做任何事。"""
     cfg = merged_config().get("playlist_cleanup") or {}
-    if not cfg.get("enabled", True):
+    if not cfg.get("enabled", False):
         return
     keep = max(1, int(cfg.get("keep_days", 180) or 180))
     if not _cleanup_lock.acquire(blocking=False):

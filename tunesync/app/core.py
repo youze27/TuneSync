@@ -232,7 +232,7 @@ CREATE TABLE IF NOT EXISTS fetch_task(
   count_per INTEGER DEFAULT 3, cron_expr TEXT, enabled INTEGER DEFAULT 1,
   push_mode TEXT DEFAULT 'llm', source_platforms TEXT DEFAULT '["all"]',
   custom_prompt TEXT DEFAULT '', scene_mode TEXT DEFAULT 'separate',
-  tracks_per INTEGER DEFAULT 0);
+  tracks_per INTEGER DEFAULT 0, daily_unique INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS fetch_run(
   id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, started_at TEXT,
   finished_at TEXT, status TEXT DEFAULT 'running', summary TEXT);
@@ -286,6 +286,8 @@ MIGRATIONS = [
     ("fetch_task", "scene_mode", "TEXT DEFAULT 'separate'"),
     # 每张歌单的曲目数，0 表示沿用 llm.tracks_per_playlist 全局值
     ("fetch_task", "tracks_per", "INTEGER DEFAULT 0"),
+    # 每天生成独立歌单：名称自动带日期，不再覆盖前一天的同名歌单
+    ("fetch_task", "daily_unique", "INTEGER DEFAULT 0"),
     # 音源累计成功/失败次数：算历史成功率用（fail_count 是连续失败、会被清零，算不了）
     ("source", "ok_count", "INTEGER DEFAULT 0"),
     ("source", "err_count", "INTEGER DEFAULT 0"),
@@ -389,8 +391,37 @@ try:  # loguru 为首选；缺失时退回标准库，保证最小环境也能�
                format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {extra[module]:<8} | {level:<7} | {message}")
     logger.configure(extra={"module": "app"})
 
+    class _PctAdapter:
+        """兼容 stdlib 风格日志调用（"xx %s yy", arg）的 loguru 适配器。
+
+        loguru 不认 %s 占位符，直接透传会把 %s 原样写进日志，
+        排障时看不到实际值。这里统一：消息含 % 且有参数时先做 % 格式化，
+        其余情况原样透传。
+        """
+
+        def __init__(self, lg):
+            self._lg = lg
+
+        @staticmethod
+        def _m(msg, args, kwargs):
+            if isinstance(msg, str) and "%" in msg and (args or kwargs):
+                try:
+                    return msg % (args if args else kwargs)
+                except Exception:
+                    return f"{msg} | args={args or kwargs}"
+            return msg
+
+        def debug(self, msg, *a, **k): self._lg.debug(self._m(msg, a, k))
+        def info(self, msg, *a, **k): self._lg.info(self._m(msg, a, k))
+        def warning(self, msg, *a, **k): self._lg.warning(self._m(msg, a, k))
+        def error(self, msg, *a, **k): self._lg.error(self._m(msg, a, k))
+        def exception(self, msg, *a, **k): self._lg.exception(self._m(msg, a, k))
+        def critical(self, msg, *a, **k): self._lg.critical(self._m(msg, a, k))
+        def success(self, msg, *a, **k): self._lg.success(self._m(msg, a, k))
+        def bind(self, **kw): return _PctAdapter(self._lg.bind(**kw))
+
     def _log(module):
-        return logger.bind(module=module)
+        return _PctAdapter(logger.bind(module=module))
 except ImportError:  # pragma: no cover - 仅在未安装 loguru 时触发
     import logging
 

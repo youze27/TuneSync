@@ -234,6 +234,7 @@ async function toggleEnabled(row, val) {
       source_platforms: normaliseSourcePlatforms(row.source_platforms),
       scene_mode: row.scene_mode || 'separate',
       tracks_per: row.tracks_per || 0,
+      daily_unique: !!row.daily_unique,
     })
     row.enabled = val
     ElMessage.success(val ? '计划已启用' : '计划已停用')

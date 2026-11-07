@@ -279,7 +279,7 @@ import { ChatDotRound, Check, Connection, Download, FolderOpened, Lock, RefreshL
 import * as api from '../api.js'
 import { auth, boot, ensureSettings, invalidateSettings, state } from '../store.js'
 
-const NAMING_VARS = ['{category}', '{name}', '{platform}']
+const NAMING_VARS = ['{category}', '{name}', '{platform}', '{date}']
 const QUALITIES = ['flac', '320', '128', '96']
 
 const loading = ref(false)
@@ -311,7 +311,8 @@ const namingPreview = computed(() =>
   (form.naming.playlist || '')
     .replaceAll('{category}', '自定义')
     .replaceAll('{name}', '深夜循环·抖音热歌精选')
-    .replaceAll('{platform}', 'LLM'),
+    .replaceAll('{platform}', 'LLM')
+    .replaceAll('{date}', new Date().toISOString().slice(0, 10)),
 )
 
 function fillFromSettings(s) {
@@ -360,6 +361,15 @@ async function load(force = false) {
 }
 
 async function save() {
+  const tpl = form.naming.playlist || ''
+  const known = new Set(['category', 'name', 'platform', 'date'])
+  const used = [...tpl.matchAll(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g)].map((m) => m[1])
+  const bad = [...new Set(used.filter((v) => !known.has(v)))]
+  if (bad.length) {
+    saveError.value = `歌单命名模板含未知变量：${bad.join('、')}`
+    ElMessage.error(saveError.value)
+    return
+  }
   saving.value = true
   saveError.value = ''
   try {

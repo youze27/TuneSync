@@ -169,6 +169,9 @@ export const getTargetPlaylists = (target, days = 0) =>
 /** 删除一张歌单（飞牛是删 playlist_track + playlist 两张表）。 */
 export const deleteTargetPlaylist = (target, id) =>
   http.delete(`/playlists/${target}/${encodeURIComponent(id)}`, { timeout: 60000 })
+/** 批量删除歌单：ids 是目标端歌单 ID 列表，逐张执行并返回失败明细。 */
+export const batchDeletePlaylists = (target, ids) =>
+  http.post('/playlists/batch-delete', { target, ids }, { timeout: 180000 })
 /** 按生成时间清理老旧歌单。dry_run=true 只预览将被删的清单。 */
 export const cleanupPlaylists = (body) =>
   http.post('/playlists/cleanup', body, { timeout: 180000 })

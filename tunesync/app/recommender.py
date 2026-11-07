@@ -259,10 +259,24 @@ def select_playlists(candidates, scene, count, prompt=None):
     if not topic:
         raise RecommenderError("推送主题为空：请选择场景或填写自定义提示词")
 
-    # 候选很多时一次性塞给模型既超 context 又稀释注意力；只取前若干条送审
-    pool = list(candidates)[:int(_cfg("select_pool", 40) or 40)]
+    # 聚合模式下候选是按平台整段拼起来的（kg 一大段、再 kw、再 mg），
+    # 直接截前 40 条会让模型只看得到酷狗。先按平台轮转交错再截断。
+    limit = int(_cfg("select_pool", 40) or 40)
+    buckets = {}
+    for c in candidates:
+        buckets.setdefault(c.get("platform", ""), []).append(c)
+    interleaved = []
+    while len(interleaved) < len(candidates):
+        progressed = False
+        for key in list(buckets):
+            if buckets[key]:
+                interleaved.append(buckets[key].pop(0))
+                progressed = True
+        if not progressed:
+            break
+    pool = interleaved[:limit]
     listing = "\n".join(
-        f"- id={c.get('id')} | 平台={PLATFORM_NAMES.get(c.get('platform', ''), c.get('platform', ''))}"
+        f"- id={c.get('platform', '')}:{c.get('id')} | 平台={PLATFORM_NAMES.get(c.get('platform', ''), c.get('platform', ''))}"
         f" | 歌单名={c.get('name', '')}"
         f" | 曲目数={c.get('count', 0)} | 播放量={c.get('play', 0)}"
         f" | 创建者={c.get('creator', '')}"
@@ -276,15 +290,26 @@ def select_playlists(candidates, scene, count, prompt=None):
     if not isinstance(pls, list):
         raise RecommenderError("LLM 返回缺少 playlists 数组")
 
-    by_id = {str(c.get("id")): c for c in pool}
+    # 不同平台的歌单 id 会重复（都是数字），只按 id 建索引会选错歌单。
+    # 送审用的是「平台:id」复合键；同时兼容模型只回纯 id 的旧格式。
+    by_key = {f"{c.get('platform', '')}:{c.get('id')}": c for c in pool}
+    plain = {}
+    for c in pool:
+        plain.setdefault(str(c.get("id")), []).append(c)
     picked, seen = [], set()
     for p in pls:
         if not isinstance(p, dict):
             continue
-        src = by_id.get(str(p.get("id", "")))
-        if src is None or src["id"] in seen:
-            continue          # 模型编造或重复的 id 直接跳过
-        seen.add(src["id"])
+        raw = str(p.get("id", "")).strip()
+        src = by_key.get(raw)
+        if src is None and raw.isdigit() and len(plain.get(raw, [])) == 1:
+            src = plain[raw][0]
+        if src is None:
+            continue          # 模型编造、或跨平台冲突且无法唯一确定的 id 跳过
+        key = (src.get("platform"), src["id"])
+        if key in seen:
+            continue
+        seen.add(key)
         item = dict(src)
         reason = str(p.get("reason") or "").strip()
         if reason:

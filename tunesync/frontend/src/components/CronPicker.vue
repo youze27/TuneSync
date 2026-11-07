@@ -102,12 +102,26 @@ function buildCron() {
   }
 }
 
+let hydrating = false
+
 function emitCron() {
+  // 回填表单期间不要反向拼 cron：识别不了的表达式（1-5、*/15 等）
+  // 会被静默改写成「每天」，用户什么都没改就存坏了定时计划。
+  if (hydrating) return
   emit('update:modelValue', buildCron())
 }
 
 /** 解析已有 cron 表达式回填表单；识别不出时退回「每天」并保留原表达式。 */
 function parseCron(expr) {
+  hydrating = true
+  try {
+    _parseCron(expr)
+  } finally {
+    hydrating = false
+  }
+}
+
+function _parseCron(expr) {
   const parts = String(expr || '').trim().split(/\s+/)
   if (parts.length !== 5) {
     form.mode = 'daily'

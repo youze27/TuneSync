@@ -240,6 +240,10 @@ async function openByLink() {
     ElMessage.warning('请先粘贴歌单链接或 ID')
     return
   }
+  if (/^\d+$/.test(link) && (platform.value === 'all' || !platform.value)) {
+    ElMessage.warning('纯数字歌单 ID 需要先切换到具体平台（如酷狗 / 网易云），不要停在「全部」')
+    return
+  }
   parsing.value = true
   try {
     const d = await api.getPlaylistDetail(platform.value, link)

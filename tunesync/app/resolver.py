@@ -319,15 +319,19 @@ def duplicate_groups(scope="exact", paths=None):
 def _plan(paths=None, scope="exact"):
     """算出「该删哪些」的清单。只读索引、不碰磁盘，所以预演是瞬时的。
 
-    paths 为空表示按默认规则处理全部；给了就只删这些路径（界面上勾选后传入），
+    paths=None 表示按默认规则处理全部；给了（含空列表）就只删这些路径，
     但每组里该保留的那一份永远跳过。
     """
-    allow = set(paths) if paths else None
+    # 空列表是「用户一项都没选」，必须直接返回空计划；旧写法 `if paths`
+    # 会把空列表当成 None（按默认规则全删），把重复副本全部误删。
+    allow = set(paths) if paths is not None else None
+    if allow is not None and not allow:
+        return []
     root = library_root()
     plan = []
     # 把 allow 传进 duplicate_groups，让分组直接在 SQL 层按 norm_key 收敛，
     # 库里有上万首歌时不用整表拉进内存
-    for g in duplicate_groups(scope, paths=list(allow) if allow else None):
+    for g in duplicate_groups(scope, paths=list(allow) if allow is not None else None):
         for d in g["duplicates"]:
             p = d["path"]
             if allow is not None and p not in allow:

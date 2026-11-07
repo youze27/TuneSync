@@ -226,6 +226,13 @@
                     <div class="muted tip">留空就用勾选的场景名当搜索词；关掉 AI 筛选时，关键词只影响去哪搜，不参与挑选</div>
                   </el-form-item>
                 </template>
+
+                  <el-form-item label="每日独立歌单">
+                    <div class="row-inline">
+                      <el-switch v-model="draft.daily_unique" />
+                      <span class="muted tip-one">开启后每天的歌单名自动带日期（如「· 11-07」），不再覆盖前一天的同名歌单；配合「定时清理」可自动淘汰旧歌单</span>
+                    </div>
+                  </el-form-item>
               </div>
             </div>
           </el-card>
@@ -314,6 +321,7 @@ const blank = () => ({
   source_platforms: ['all'],
   scene_mode: 'separate',
   tracks_per: 0,
+  daily_unique: false,
 })
 const draft = reactive(blank())
 
@@ -445,6 +453,7 @@ function fillFromTask(row) {
     source_platforms: normaliseSourcePlatforms(row.source_platforms),
     scene_mode: row.scene_mode === 'merge' ? 'merge' : 'separate',
     tracks_per: Number.isInteger(row.tracks_per) ? row.tracks_per : 0,
+    daily_unique: !!row.daily_unique,
   })
 }
 
@@ -511,20 +520,23 @@ async function submit(runAfter) {
       source_platforms: normaliseSourcePlatforms(draft.source_platforms),
       scene_mode: draft.scene_mode,
       tracks_per: draft.tracks_per || 0,
+      daily_unique: !!draft.daily_unique,
     }
 
-    // preferences 是整节覆盖，必须把场景/提示词/歌单数一起带上，
-    // 否则只写 push_mode 会把服务端已有的其它默认值抹掉
-    await api.putSettings({
-      preferences: {
-        categories: body.categories,
-        count_per: body.count_per,
-        custom_prompt: body.custom_prompt,
-        push_mode: body.push_mode,
-        source_platforms: body.source_platforms,
-      },
-    })
-    invalidateSettings()
+    // preferences 是「新建计划」的表单默认值，且 putSettings 是整节覆盖。
+    // 编辑旧计划时写它会让新建页默认值变成这条旧计划的配置。
+    if (!editing.value) {
+      await api.putSettings({
+        preferences: {
+          categories: body.categories,
+          count_per: body.count_per,
+          custom_prompt: body.custom_prompt,
+          push_mode: body.push_mode,
+          source_platforms: body.source_platforms,
+        },
+      })
+      invalidateSettings()
+    }
 
     const saved = editing.value
       ? await api.updateTask(editing.value.id, body)
@@ -539,8 +551,13 @@ async function submit(runAfter) {
       return
     }
     ElMessage.success(editing.value ? '计划已更新' : '计划已创建')
-    if (editing.value) router.push('/tasks')
-    else router.replace({ path: '/push-config', query: { id: String(taskId) } })
+    if (editing.value) {
+      router.push('/tasks')
+    } else if (taskId) {
+      // 新建后必须切到编辑态，否则再点一次「保存」会建出一条重复计划
+      editing.value = { id: taskId, ...body }
+      router.replace({ path: '/push-config', query: { id: String(taskId) } })
+    }
   } catch (e) {
     saveError.value = api.errText(e, '保存失败')
   } finally {

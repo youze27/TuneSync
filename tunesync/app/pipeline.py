@@ -12,10 +12,13 @@ Scheduler/Cron 或「立即执行」→ 按推送方式取歌单 → 解析下�
 """
 import hashlib
 import json
+import random
 import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
+from string import Formatter
 
 from . import platforms, recommender, resolver, scraper, writers
 from .core import CATMAP, db, emit, log_pipeline, merged_config, merged_targets, now
@@ -570,6 +573,10 @@ def _run(task, run_id):
     source_plats = source_platforms_of(task)
     scene_mode = scene_mode_of(task)
     tracks_per = tracks_per_of(task)
+    if scene_mode == "merge":
+        # 「合并推送」在界面上明确承诺只产出一张综合歌单，后端必须跟着收敛，
+        # 否则这一轮仍会按 count_per 生成多张，跟 UI 说明对不上。
+        count = 1
     summary = {"playlists": 0, "local": 0, "downloaded": 0, "skipped": 0,
                "attempted": 0, "errors": []}
 
@@ -610,8 +617,15 @@ def _run(task, run_id):
                 job = _process_playlist(run_id, rpid, pl["platform"], category, pl, summary, pool)
                 if not job:
                     continue
-                job["name"] = naming.format(category=cat_name, name=pl.get("name", ""),
-                                            platform=_platform_label(pl["platform"]))
+                final_name = _safe_format(
+                    naming, category=cat_name, name=pl.get("name", ""),
+                    platform=_platform_label(pl["platform"]),
+                    date=date.today().isoformat())
+                # 「每天生成独立歌单」：名称追加日期，避免目标端同名歌单被
+                # upsert 覆盖，看起来永远只有同一张。
+                if task.get("daily_unique"):
+                    final_name = f"{final_name} · {date.today().strftime('%m-%d')}"
+                job["name"] = final_name
                 conn.execute(
                     "INSERT OR IGNORE INTO playlist(platform,source_id,name,category) VALUES(?,?,?,?)",
                     (pl["platform"], source_id, job["name"], cat_name))
@@ -621,6 +635,54 @@ def _run(task, run_id):
 
     _sync_targets(run_id, write_jobs, summary)
     return summary
+
+
+class _SafeDict(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def _safe_format(tpl, **kw):
+    """命名模板安全格式化：未知变量原样保留，花括号不配对也不抛异常。
+
+    旧实现用 str.format，用户手误写 {platfrom} 或单个 { 会抛 KeyError /
+    ValueError，异常一路冒泡把整轮 run 判 failed——歌都下载完了却一张
+    歌单都写不出去。这里降级为「原样输出」，最多这一张名字难看点。
+    """
+    try:
+        return Formatter().vformat(str(tpl or "{name}"), (), _SafeDict(kw))
+    except Exception:
+        return str(tpl or "{name}")
+
+
+def _rotate_candidates(candidates, task_hint=""):
+    """让「每次都推热榜第一张」变成「每天换一批」。
+
+    以「任务 + 当天日期」为种子做确定性洗牌：同一天重跑结果稳定（幂等），
+    不同日期顺序不同，source_raw 取前 N 张自然每天不同；再把近 14 天
+    已经推过的 source_id 稳定地排到后面，尽量不重复。候选池不够时仍会
+    复用旧歌单，不至于没歌可推。
+    """
+    if not candidates:
+        return candidates
+    out = list(candidates)
+    random.Random(f"{task_hint}|{date.today().isoformat()}").shuffle(out)
+    try:
+        recent = {
+            r["source_id"] for r in db().execute(
+                "SELECT rp.source_id FROM run_playlist rp "
+                "JOIN fetch_run fr ON fr.id = rp.run_id "
+                "WHERE fr.started_at >= datetime('now','-14 day') "
+                "AND rp.source_id IS NOT NULL")
+        }
+    except Exception:
+        recent = set()
+    if recent:
+        def sid(c):
+            raw = f"{c.get('platform', '')}|{c.get('id', '')}".encode("utf-8")
+            return hashlib.md5(raw).hexdigest()[:12]
+        out.sort(key=lambda c: sid(c) in recent)
+    return out
 
 
 def _platform_label(platform):
@@ -660,7 +722,14 @@ def _fetch_source_playlists(push_mode, source_plats, scene, count, prompt):
     source_raw   直接取热度靠前的 count 张，不过 LLM。
     source_llm   送一批候选给 LLM 挑，挑完再逐张取详情。
     """
+    # 自定义提示词常常是一整段「请按星期几生成…」的指令。source_raw 根本
+    # 不会调用 LLM，整段拿去当搜索关键词只会 0 结果、退回默认热榜，于是
+    # 天天都是同一张。这里把过长的指令当作意图描述，退回用场景名搜索。
     keyword = prompt or scene
+    if len(keyword) > 40:
+        log_pipeline.info("搜索关键词过长（%s 字），按指令处理并回退场景「%s」",
+                          len(keyword), scene)
+        keyword = scene
     candidates, errors = _collect_candidates(source_plats, keyword)
     for plat, msg in errors:
         log_pipeline.warning("候选歌单拉取失败 [%s]：%s", plat, msg)
@@ -671,7 +740,8 @@ def _fetch_source_playlists(push_mode, source_plats, scene, count, prompt):
     if push_mode == "source_llm":
         picked = recommender.select_playlists(candidates, scene, count, prompt=prompt)
     else:
-        picked = candidates[:count]
+        # 旧实现固定 candidates[:count]，热榜第一页不变就天天推同一张。
+        picked = _rotate_candidates(candidates, f"{push_mode}|{keyword}")[:count]
     if not picked:
         raise RuntimeError("没有选中任何歌单")
 
@@ -682,9 +752,9 @@ def _fetch_source_playlists(push_mode, source_plats, scene, count, prompt):
             out.append(pl)
         if len(out) >= count:
             break
-    if not out and picked:
-        # 挑中的这几张恰好是隐私歌单/平台空返回，别整个任务判死，
-        # 从候选池里继续往后补，凑满 count 张为止。
+    if len(out) < count:
+        # 挑中的几张里若有隐私歌单/平台空返回，继续从候选池往后补齐；
+        # 旧实现只有「一张都没取到」才补，导致静默少推。
         chosen = {(c["platform"], c["id"]) for c in picked}
         for c in candidates:
             if (c["platform"], c["id"]) in chosen:
@@ -702,22 +772,29 @@ def _fetch_source_playlists(push_mode, source_plats, scene, count, prompt):
 def _collect_candidates(source_plats, keyword):
     """跨平台聚合候选歌单。单平台失败只记录，不影响其他平台。"""
     want = max(10, int(merged_config().get("push", {}).get("candidate_pool", 30) or 30))
+    # 只取第一页的话热榜前几名天天一样；多翻两页把候选池撑大，再交给
+    # _rotate_candidates 按日期轮换，才有「每天不同」的余地。
     candidates, errors = [], []
     for plat in source_plats:
-        try:
-            data = platforms.square(plat, cat=keyword, offset=0, limit=want)
-            lists = data.get("lists") or []
-            # wy / tx 的 cat 必须是官方分类名或标签 ID，填自定义提示词会返回 0 条。
-            # 这时退回平台默认分类，至少还能按热度拿到候选。
-            if not lists and plat in ("wy", "tx"):
-                fallback = platforms.square(plat, cat=None, offset=0, limit=want)
-                if fallback.get("lists"):
-                    log_pipeline.info("[%s] 关键词「%s」无结果，改用默认分类", plat, keyword)
-                    data, lists = fallback, fallback["lists"]
-        except Exception as e:
-            errors.append((plat, str(e)[:120]))
-            continue
-        for item in lists:
+        plat_lists = []
+        for pg in range(3):
+            try:
+                data = platforms.square(plat, cat=keyword, offset=pg * want, limit=want)
+                lists = data.get("lists") or []
+                # wy / tx 的 cat 必须是官方分类名或标签 ID，填自定义提示词会返回 0 条。
+                # 这时退回平台默认分类，至少还能按热度拿到候选。
+                if not lists and plat in ("wy", "tx"):
+                    fallback = platforms.square(plat, cat=None, offset=0, limit=want)
+                    if fallback.get("lists"):
+                        log_pipeline.info("[%s] 关键词「%s」无结果，改用默认分类", plat, keyword)
+                        lists = fallback["lists"]
+            except Exception as e:
+                errors.append((plat, str(e)[:120]))
+                break
+            plat_lists.extend(lists)
+            if len(lists) < want:
+                break
+        for item in plat_lists:
             if not item.get("id"):
                 continue
             # 聚合来源（all）返回的每一项自带真实 platform（kg/kw/mg），
@@ -886,8 +963,9 @@ def _run_import(platform, pid, run_id):
         job = _process_playlist(run_id, rpid, platform, category, playlist, summary, pool)
     if not job:
         return summary
-    name = naming.format(category="平台歌单", name=detail.get("name", ""),
-                         platform=platforms.PLATFORM_NAMES.get(platform, platform))
+    name = _safe_format(naming, category="平台歌单", name=detail.get("name", ""),
+                        platform=platforms.PLATFORM_NAMES.get(platform, platform),
+                        date=date.today().isoformat())
     job["name"] = name
     conn.execute("INSERT OR IGNORE INTO playlist(platform,source_id,name,category) VALUES(?,?,?,?)",
                  (platform, source_id, name, "平台歌单"))

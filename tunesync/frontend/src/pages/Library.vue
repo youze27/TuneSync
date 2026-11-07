@@ -60,6 +60,7 @@
         ref="tableRef"
         v-loading="loading"
         :data="items"
+        row-key="path"
         size="small"
         border
         stripe
@@ -304,6 +305,12 @@ async function doDedupe(dryRun) {
     const paths = (dup.value.groups || [])
       .flatMap((g) => g.duplicates.map((d) => d.path))
       .filter((p) => !skip.has(p))
+    // 全部豁免时不能把空列表发过去：旧实现 `paths || None` 会把
+    // 「一项都不删」变成「按默认规则全删」。
+    if (!paths.length) {
+      ElMessage.info('所有重复文件都已豁免，没有需要删除的内容')
+      return
+    }
     if (dryRun) {
       const d = await api.runDedupe({ paths, dry_run: true })
       preview.value = d
@@ -396,6 +403,19 @@ async function createPlaylist() {
   const name = playlistName.value.trim()
   if (!name) {
     ElMessage.warning('先给歌单起个名字')
+    return
+  }
+  if (!selection.value.length) {
+    ElMessage.warning('先在表格里勾选要加入歌单的歌曲')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `将创建歌单「${name}」。若推送平台上已存在同名歌单，原有曲目会被覆盖替换。`,
+      '创建歌单',
+      { type: 'warning', confirmButtonText: '继续', cancelButtonText: '取消' },
+    )
+  } catch {
     return
   }
   creating.value = true

@@ -122,6 +122,8 @@ def put_settings(body: dict):
         raise HTTPException(400, f"不支持覆盖的配置节：{sorted(bad)}")
     if "preferences" in body:
         _check_preferences(body["preferences"])
+    if "naming" in body:
+        _check_naming(body["naming"])
     if "llm" in body:
         body["llm"] = _normalize_llm(body["llm"])
     if "auth" in body:
@@ -132,6 +134,25 @@ def put_settings(body: dict):
     kv_set("settings", cur)
     scheduler.reload_config()
     return get_settings()
+
+
+def _check_naming(section):
+    """命名模板里的未知变量会让整轮推送白下载，保存时就明确拒绝手误。
+
+    后端已改用安全格式化兜底，但让用户以为 {platfrom} 会生效同样糟糕。
+    """
+    import string
+    tpl = (section or {}).get("playlist") if isinstance(section, dict) else None
+    if tpl is None:
+        return
+    allowed = {"category", "name", "platform", "date"}
+    try:
+        fields = {f for _, f, _, _ in string.Formatter().parse(str(tpl)) if f}
+    except ValueError as e:
+        raise HTTPException(400, f"歌单命名模板花括号不配对：{e}")
+    bad = fields - allowed
+    if bad:
+        raise HTTPException(400, f"歌单命名模板含未知变量：{sorted(bad)}；可用：{sorted(allowed)}")
 
 
 def _normalize_llm(llm):
@@ -335,6 +356,8 @@ class TaskIn(BaseModel):
     scene_mode: str = "separate"
     # 每张歌单的曲目数，0 = 沿用 llm.tracks_per_playlist
     tracks_per: int = Field(default=0, ge=0, le=200)
+    # 每天生成独立歌单：名称自动带日期，不再覆盖前一天的同名歌单
+    daily_unique: bool = False
 
 
 def _check_task(t: TaskIn):
@@ -380,8 +403,8 @@ def create_task(t: TaskIn):
     _check_task(t)
     db().execute(
         "INSERT INTO fetch_task(name,platforms,categories,count_per,cron_expr,enabled,"
-        "push_mode,source_platforms,custom_prompt,scene_mode,tracks_per)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "push_mode,source_platforms,custom_prompt,scene_mode,tracks_per,daily_unique)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         (t.name, json.dumps(t.platforms), json.dumps(t.categories),
          t.count_per, t.cron_expr, int(t.enabled),
          pipeline.normalise_push_mode(t.push_mode),
@@ -389,7 +412,7 @@ def create_task(t: TaskIn):
                     ensure_ascii=False),
          t.custom_prompt.strip(),
          pipeline.normalise_scene_mode(t.scene_mode),
-         int(t.tracks_per or 0)))
+         int(t.tracks_per or 0), int(bool(t.daily_unique))))
     db().commit()
     scheduler.rebuild_jobs()
     log_api.info("新建任务 #%s %s", db().execute("SELECT last_insert_rowid()").fetchone()[0], t.name)
@@ -403,14 +426,14 @@ def update_task(tid: int, t: TaskIn):
     _check_task(t)
     db().execute(
         "UPDATE fetch_task SET name=?,platforms=?,categories=?,count_per=?,cron_expr=?,enabled=?,"
-        "push_mode=?,source_platforms=?,custom_prompt=?,scene_mode=?,tracks_per=? WHERE id=?",
+        "push_mode=?,source_platforms=?,custom_prompt=?,scene_mode=?,tracks_per=?,daily_unique=? WHERE id=?",
         (t.name, json.dumps(t.platforms), json.dumps(t.categories),
          t.count_per, t.cron_expr, int(t.enabled),
          pipeline.normalise_push_mode(t.push_mode),
          json.dumps(pipeline.normalise_source_platforms(t.source_platforms),
                     ensure_ascii=False), t.custom_prompt.strip(),
          pipeline.normalise_scene_mode(t.scene_mode),
-         int(t.tracks_per or 0), tid))
+         int(t.tracks_per or 0), int(bool(t.daily_unique)), tid))
     db().commit()
     scheduler.rebuild_jobs()
     return {"ok": True}
@@ -437,7 +460,10 @@ def run_task(tid: int):
         raise HTTPException(404, "任务不存在")
     if pipeline.is_running(tid):
         raise HTTPException(409, "该任务已在队列中或正在运行")
-    pipeline.run_async(tid)
+    # run_async 占不到工位会返回 False；旧实现丢掉返回值照样回 200，
+    # 用户以为已执行其实什么都没跑。
+    if not pipeline.run_async(tid):
+        raise HTTPException(409, "该任务已在队列中或正在运行")
     q = pipeline.queue_state()
     return {"ok": True,
             "detail": "已排入推送队列" if q["depth"] else "已触发后台执行",
@@ -694,8 +720,8 @@ def _resolve_ref(body: PlaylistRef):
         plat, pid = platforms.parse_link(body.link, body.platform)
     except platforms.PlatformError as e:
         raise HTTPException(400, str(e))
-    if not plat:
-        raise HTTPException(400, "纯数字 ID 需要同时选择平台")
+    if not plat or plat == "all":
+        raise HTTPException(400, "纯数字 ID 需要先选择具体平台（不要停在「全部」）")
     return plat, pid
 
 
@@ -921,8 +947,8 @@ def playlists_list(target: str, days: int = 0):
     if days > 0:
         cutoff = time.time() - days * 86400
         pls = [p for p in pls
-               if (p.get("created") or p.get("changed"))
-               and (p.get("created") or p.get("changed")) < cutoff]
+               if max(p.get("created") or 0, p.get("changed") or 0)
+               and max(p.get("created") or 0, p.get("changed") or 0) < cutoff]
     return {"target": target, "playlists": pls, "count": len(pls)}
 
 
@@ -937,18 +963,58 @@ def playlist_delete(target: str, pid: str):
         raise HTTPException(502, str(e)[:300])
 
 
+class BatchDeleteIn(BaseModel):
+    target: str
+    ids: list[str] = Field(default_factory=list)
+
+
+@router.post("/playlists/batch-delete", tags=["歌单管理"])
+def playlists_batch_delete(body: BatchDeleteIn):
+    """一次删除多张歌单。逐张执行，单张失败不影响其它，返回明细。
+
+    歌单管理页多选后走这里；只删歌单，不动音乐文件。
+    """
+    if body.target not in ("navidrome", "feiniu"):
+        raise HTTPException(400, f"未知推送目标：{body.target}")
+    if not body.ids:
+        raise HTTPException(400, "没有选中任何歌单")
+    if len(body.ids) > 200:
+        raise HTTPException(400, "一次最多删除 200 张歌单")
+    try:
+        w = writers.build_writer(merged_targets(), body.target)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    ok, failed = [], []
+    for pid in dict.fromkeys(body.ids):
+        try:
+            w.delete_playlist(pid)
+            ok.append(pid)
+        except Exception as e:
+            failed.append({"id": pid, "error": str(e)[:160]})
+    log_api.info("批量删除歌单[%s]：成功 %s 张，失败 %s 张",
+                 body.target, len(ok), len(failed))
+    return {"ok": True, "target": body.target, "deleted": len(ok),
+            "failed": failed, "ids": ok}
+
+
 class CleanupIn(BaseModel):
     keep_days: int = Field(default=0, ge=0)      # 0 表示沿用全局设置里的保留天数
     dry_run: bool = False
     names: list[str] | None = None
+    # 只清理指定目标：旧实现无条件遍历 navidrome + feiniu，
+    # 界面勾「仅当前」也会把另一个目标里的同名歌单删掉。
+    target: str | None = None
 
 
 @router.post("/playlists/cleanup", tags=["歌单管理"])
 def playlists_cleanup(body: CleanupIn):
     """按生成时间清理老旧歌单。dry_run=true 只返回将被删的清单，不动数据。"""
+    if body.target and body.target not in ("navidrome", "feiniu"):
+        raise HTTPException(400, f"未知推送目标：{body.target}")
     keep = body.keep_days or int(merged_config().get("playlist_cleanup", {}).get("keep_days", 180) or 180)
     return writers.cleanup_old_playlists(merged_targets(), keep,
-                                         dry_run=body.dry_run, only_names=body.names)
+                                         dry_run=body.dry_run, only_names=body.names,
+                                         only_target=body.target)
 
 
 # ------------------------------------------------------------------ 本地库
@@ -986,10 +1052,22 @@ def library_duplicates(scope: str = "exact"):
 
 
 class DedupeIn(BaseModel):
-    """paths 留空表示按默认规则处理全部；dry_run 只统计不删；async 走后台线程。"""
+    """paths=None 表示按默认规则处理全部；空列表表示一项都不删。
+
+    dry_run 只统计不删；async 走后台线程。
+    """
     paths: list[str] = Field(default_factory=list)
     dry_run: bool = True
     async_run: bool = False
+
+
+def _dedupe_paths(paths):
+    """区分「显式空列表」与「不指定」。
+
+    旧实现 `body.paths or None` 把用户在去重弹窗里「全部豁免」产生的
+    空列表变成 None，而 None 的语义是「按默认规则全删」，正好反过来。
+    """
+    return list(paths) if paths is not None else None
 
 
 @router.post("/library/dedupe", tags=["本地库"])
@@ -1001,10 +1079,10 @@ def library_dedupe(body: DedupeIn):
     """
     if body.async_run:
         try:
-            return resolver.dedupe_async(paths=body.paths or None, dry_run=body.dry_run)
+            return resolver.dedupe_async(paths=_dedupe_paths(body.paths), dry_run=body.dry_run)
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
-    return resolver.dedupe(paths=body.paths or None, dry_run=body.dry_run)
+    return resolver.dedupe(paths=_dedupe_paths(body.paths), dry_run=body.dry_run)
 
 
 @router.get("/library/dedupe/status", tags=["本地库"])

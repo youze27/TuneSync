@@ -914,16 +914,21 @@ def build_writer(targets_cfg, target):
     raise RuntimeError(f"目标 {target} 未配置或不可用")
 
 
-def cleanup_old_playlists(targets_cfg, keep_days, dry_run=False, only_names=None):
-    """按歌单生成时间删除老旧歌单，返回每个目标的处理明细。
+def cleanup_old_playlists(targets_cfg, keep_days, dry_run=False, only_names=None,
+                           only_target=None):
+    """按歌单最后修改时间删除老旧歌单，返回每个目标的处理明细。
 
-    只删「认得出生成时间且早于 keep_days」的歌单；时间认不出的（如飞牛
-    playlist 表没有时间列）一律跳过，宁可留着也不误删。
+    only_names 是「允许删除的名字白名单」；传空列表表示一项都不删
+    （旧实现把空列表当成「不限制」，结果把全部老歌单都删了）。
+    only_target 指定时只处理该目标，避免「仅当前」跨目标误删同名歌单。
     """
     now_ts = time.time()
     cutoff = now_ts - max(1, int(keep_days)) * 86400
+    if only_names is not None and not only_names:
+        return {"total": 0, "results": []}
+    targets = (only_target,) if only_target else ("navidrome", "feiniu")
     results, total = [], 0
-    for target in ("navidrome", "feiniu"):
+    for target in targets:
         try:
             w = build_writer(targets_cfg, target)
         except Exception as e:
@@ -939,7 +944,9 @@ def cleanup_old_playlists(targets_cfg, keep_days, dry_run=False, only_names=None
         for p in pls:
             if only_names and p["name"] not in only_names:
                 continue
-            ts = p.get("created") or p.get("changed")
+            # 用「最后修改时间」而不是首次创建：每天重新推送的活跃歌单
+            # created 一直停在首次那天，旧逻辑会把它当老歌单删掉。
+            ts = max(p.get("created") or 0, p.get("changed") or 0)
             if not ts or ts >= cutoff:
                 continue
             if dry_run:
