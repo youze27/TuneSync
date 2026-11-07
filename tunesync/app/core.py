@@ -265,6 +265,9 @@ CREATE TABLE IF NOT EXISTS auth_session(
   token TEXT PRIMARY KEY, user_id INTEGER, created_at TEXT, expires_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_session_user ON auth_session(user_id);
 CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS agent_memory(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, content TEXT,
+  payload TEXT, created_at TEXT);
 """
 
 # 老版本库可能缺列，启动时补齐（ADD COLUMN 幂等）

@@ -897,6 +897,30 @@ def import_playlist_async(platform, pid):
     return True
 
 
+def import_generated_async(name, tracks):
+    """后台创建一张由 AI 结构化生成的歌单，复用导入的下载 / 写入链路。"""
+    if not (name or "").strip() or not tracks:
+        raise RuntimeError("歌单缺少名称或曲目")
+    guard = "agent:" + hashlib.md5(name.encode("utf-8")).hexdigest()[:10]
+    if not _acquire(guard):
+        raise RuntimeError("同名歌单已在创建中")
+    threading.Thread(target=_generated_execute, args=(name, tracks, guard),
+                     name=f"agent-{guard}", daemon=True).start()
+    return True
+
+
+def _generated_execute(name, tracks, guard):
+    try:
+        _enter_slot(guard, f"AI 歌单 {name}")
+        try:
+            return _import_body("llm", "generated",
+                                generated={"name": name, "tracks": tracks})
+        finally:
+            _leave_slot(guard)
+    finally:
+        _release(guard)
+
+
 def _import_execute(platform, pid, guard):
     """与 _execute 同构：同样要排队、同样在 finally 里归还槽位与运行位。"""
     label = f"导入歌单 {platform}#{pid}"
@@ -910,11 +934,13 @@ def _import_execute(platform, pid, guard):
         _release(guard)
 
 
-def _import_body(platform, pid):
+def _import_body(platform, pid, generated=None):
     conn = db()
+    run_label = (f"AI 歌单：{(generated.get('name') or '')[:40]}" if generated
+                 else f"导入歌单：{platforms.PLATFORM_NAMES.get(platform, platform)} #{pid}")
     conn.execute(
         "INSERT INTO fetch_run(task_id, task_name, started_at, status) VALUES(?,?,?, 'running')",
-        (None, f"导入歌单：{platforms.PLATFORM_NAMES.get(platform, platform)} #{pid}", now()))
+        (None, run_label, now()))
     conn.commit()
     run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     emit({"type": "run_start", "run_id": run_id, "task_id": None,
@@ -922,7 +948,7 @@ def _import_body(platform, pid):
     _remember(run_id, "progress",
               {"stage": "run", "detail": f"导入歌单 {platform}#{pid} 开始运行"})
     try:
-        summary = _run_import(platform, pid, run_id)
+        summary = _run_import(platform, pid, run_id, generated)
         nothing_usable = summary.get("playlists", 0) == 0 and summary.get("attempted", 0) == 0
         status = ("failed" if nothing_usable and summary.get("errors")
                   else ("partial" if summary.get("errors") else "success"))
@@ -943,18 +969,22 @@ def _import_body(platform, pid):
     return run_id
 
 
-def _run_import(platform, pid, run_id):
+def _run_import(platform, pid, run_id, generated=None):
     conn = db()
     summary = {"playlists": 0, "local": 0, "downloaded": 0, "skipped": 0,
                "attempted": 0, "errors": []}
     naming = merged_config().get("naming", {}).get("playlist", "{name}")
-    try:
-        detail = platforms.detail(platform, pid)
-    except Exception as e:
-        summary["errors"].append(f"拉取歌单失败：{str(e)[:200]}")
-        _emit_run(run_id, {"type": "progress", "stage": "fetch-error", "run_id": run_id,
-                           "detail": str(e)[:120]})
-        return summary
+    if generated:
+        detail = {"name": generated.get("name") or "AI 歌单", "cover": "",
+                  "tracks": generated.get("tracks") or []}
+    else:
+        try:
+            detail = platforms.detail(platform, pid)
+        except Exception as e:
+            summary["errors"].append(f"拉取歌单失败：{str(e)[:200]}")
+            _emit_run(run_id, {"type": "progress", "stage": "fetch-error", "run_id": run_id,
+                               "detail": str(e)[:120]})
+            return summary
     if not detail.get("tracks"):
         summary["errors"].append(
             f"歌单「{detail.get('name') or pid}」没有曲目（隐私歌单或平台空返回）")
@@ -968,13 +998,17 @@ def _run_import(platform, pid, run_id):
     except Exception:
         pass
 
-    category = {"code": "platform", "name": "平台歌单"}
-    # 平台真实歌单按 pid 幂等：重复导入同一张是更新而不是膨胀
-    source_id = hashlib.md5(f"{platform}|{pid}".encode("utf-8")).hexdigest()[:12]
+    is_ai = bool(generated)
+    category = {"code": "llm", "name": "AI 歌单"} if is_ai else {"code": "platform", "name": "平台歌单"}
+    cat_name = category["name"]
+    plat_key = "llm" if is_ai else platform
+    # 平台歌单按 pid 幂等；AI 歌单按名称幂等，重复创建是更新而不是膨胀
+    seed = f"llm|{detail.get('name', '')}" if is_ai else f"{platform}|{pid}"
+    source_id = hashlib.md5(seed.encode("utf-8")).hexdigest()[:12]
     conn.execute(
         "INSERT INTO run_playlist(run_id,platform,category,name,cover_url,source_id,status)"
         " VALUES(?,?,?,?,?,?, 'pending')",
-        (run_id, platform, "平台歌单", detail.get("name", ""), detail.get("cover", ""), source_id))
+        (run_id, plat_key, cat_name, detail.get("name", ""), detail.get("cover", ""), source_id))
     conn.commit()
     rpid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     summary["attempted"] += 1
@@ -985,12 +1019,12 @@ def _run_import(platform, pid, run_id):
         job = _process_playlist(run_id, rpid, platform, category, playlist, summary, pool)
     if not job:
         return summary
-    name = _safe_format(naming, category="平台歌单", name=detail.get("name", ""),
-                        platform=platforms.PLATFORM_NAMES.get(platform, platform),
+    name = _safe_format(naming, category=cat_name, name=detail.get("name", ""),
+                        platform="AI" if is_ai else platforms.PLATFORM_NAMES.get(platform, platform),
                         date=date.today().isoformat())
     job["name"] = name
     conn.execute("INSERT OR IGNORE INTO playlist(platform,source_id,name,category) VALUES(?,?,?,?)",
-                 (platform, source_id, name, "平台歌单"))
+                 (plat_key, source_id, name, cat_name))
     conn.commit()
     _sync_targets(run_id, [job], summary)
     return summary

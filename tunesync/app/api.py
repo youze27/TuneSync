@@ -9,10 +9,10 @@ import threading
 import time
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import auth, lxbridge, pipeline, plan_model, platforms, recommender, resolver, scheduler, writers
+from . import agent, auth, lxbridge, pipeline, plan_model, platforms, recommender, resolver, scheduler, writers
 from .core import (CATEGORIES, CATMAP, CONFIG, _apply_host, db, emit, host_alias,
                    kv_get, kv_set, log_api, merged_config, merged_targets, now,
                    running_in_container, source_cfg)
@@ -489,6 +489,69 @@ def execute_plan(tid: int):
     q = pipeline.queue_state()
     return {"ok": True, "detail": "已排入推送队列" if q["depth"] else "已触发后台执行",
             "queue_depth": q["depth"]}
+
+
+# ------------------------------------------------------------------ AI 音乐智能体
+
+def _sse(payload):
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@router.get("/agent/config", tags=["AI 助手"])
+def agent_config():
+    cfg = merged_config().get("llm") or {}
+    return {"configured": agent.configured(), "model": cfg.get("model") or ""}
+
+
+@router.post("/agent/chat", tags=["AI 助手"])
+def agent_chat(body: dict):
+    """流式对话。事件：thinking / token / playlists / creating / created / memory / done / error。"""
+    def stream():
+        try:
+            for ev in agent.run(body or {}):
+                yield _sse(ev)
+        except Exception as e:
+            log_api.error("智能体异常：%s", e)
+            yield _sse({"type": "error", "message": f"智能体异常：{str(e)[:180]}"})
+    return StreamingResponse(
+        stream(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                 "Connection": "keep-alive"})
+
+
+@router.get("/agent/memories", tags=["AI 助手"])
+def agent_memories():
+    """长期偏好 + 历史推荐（可查看以前推荐过哪些歌单/歌曲）。"""
+    return {"memories": agent.memories(60), "history": agent.history(30)}
+
+
+class AgentMemoryIn(BaseModel):
+    content: str = Field(min_length=1, max_length=500)
+
+
+@router.post("/agent/memories", tags=["AI 助手"])
+def agent_memory_add(body: AgentMemoryIn):
+    mid = agent.add_memory("preference", body.content.strip())
+    return {"ok": True, "id": mid}
+
+
+@router.delete("/agent/memories/{mid}", tags=["AI 助手"])
+def agent_memory_del(mid: int):
+    agent.delete_memory(mid)
+    return {"ok": True}
+
+
+@router.post("/agent/create", tags=["AI 助手"])
+def agent_create(body: dict):
+    """用户模式下，把选中的歌单写入已启用的推送平台（后台排队执行）。"""
+    items = body.get("items") or []
+    if not isinstance(items, list) or not items:
+        raise HTTPException(400, "没有可创建的歌单")
+    indexes = body.get("indexes")
+    if indexes is not None and (not isinstance(indexes, list)
+                                or any(not isinstance(i, int) for i in indexes)):
+        raise HTTPException(400, "indexes 格式不正确")
+    return {"ok": True, **agent.create_items(items, indexes)}
 
 
 # ------------------------------------------------------------------ 计划任务（旧接口兼容）

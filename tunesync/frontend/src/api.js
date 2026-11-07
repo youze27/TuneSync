@@ -189,3 +189,46 @@ export const deletePlan = (id) => http.delete(`/plans/${id}`)
 export const runPlan = (id) => http.post(`/plans/${id}/run`)
 /** 执行预览：纯计算，不落库不跑流水线。 */
 export const previewPlan = (plan) => http.post('/plans/preview', { plan })
+
+// ───────────────────────────── AI 音乐智能体
+export const getAgentConfig = () => http.get('/agent/config')
+export const getAgentMemories = () => http.get('/agent/memories')
+export const addAgentMemory = (content) => http.post('/agent/memories', { content })
+export const delAgentMemory = (id) => http.delete(`/agent/memories/${id}`)
+export const createAgentPlaylists = (items, indexes) =>
+  http.post('/agent/create', { items, indexes }, { timeout: 60000 })
+
+/**
+ * SSE 流式对话。onEvent 逐条收到 {type, ...}；流结束 resolve。
+ * 走原生 fetch 而不是 axios —— axios 拦截器会把整段响应当普通 JSON 等它结束。
+ */
+export async function agentChat(body, onEvent) {
+  const resp = await fetch('/api/agent/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(body),
+  })
+  if (resp.status === 401) {
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('ts:unauthorized'))
+    throw new Error('未登录或会话已过期')
+  }
+  if (!resp.ok) throw new Error(`接口返回 ${resp.status}`)
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let i
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, i)
+      buf = buf.slice(i + 2)
+      for (const line of block.split('\n')) {
+        if (!line.startsWith('data:')) continue
+        try { onEvent(JSON.parse(line.slice(5).trim())) } catch { /* 忽略坏帧 */ }
+      }
+    }
+  }
+}
