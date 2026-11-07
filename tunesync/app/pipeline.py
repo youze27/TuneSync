@@ -727,9 +727,11 @@ def _fetch_source_playlists(push_mode, source_plats, scene, count, prompt):
     # 天天都是同一张。这里把过长的指令当作意图描述，退回用场景名搜索。
     keyword = prompt or scene
     if len(keyword) > 40:
+        # merge 模式下 scene 是几十个场景名用顿号拼起来的，整串拿去搜同样
+        # 是 0 结果；取第一个场景短语当关键词，既短又能真正搜到歌单。
+        keyword = (scene.split("、")[0] or "热门").strip()[:20]
         log_pipeline.info("搜索关键词过长（%s 字），按指令处理并回退场景「%s」",
-                          len(keyword), scene)
-        keyword = scene
+                          len(prompt or scene), keyword)
     candidates, errors = _collect_candidates(source_plats, keyword)
     for plat, msg in errors:
         log_pipeline.warning("候选歌单拉取失败 [%s]：%s", plat, msg)
@@ -741,7 +743,7 @@ def _fetch_source_playlists(push_mode, source_plats, scene, count, prompt):
         picked = recommender.select_playlists(candidates, scene, count, prompt=prompt)
     else:
         # 旧实现固定 candidates[:count]，热榜第一页不变就天天推同一张。
-        picked = _rotate_candidates(candidates, f"{push_mode}|{keyword}")[:count]
+        picked = _rotate_candidates(candidates, f"{push_mode}|{scene}|{keyword}")[:count]
     if not picked:
         raise RuntimeError("没有选中任何歌单")
 
