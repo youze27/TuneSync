@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, api, auth, core, resolver, scheduler
+from . import __version__, api, auth, core, resolver, scheduler, taste
 from .core import hub, init_db, log_api, recover_stale_runs
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -46,6 +46,7 @@ async def lifespan(_app):
     recover_stale_runs()   # 上次进程被杀掉时留下的 running 记录会永远挂着，先收敛
     hub.bind_loop(asyncio.get_running_loop())
     scheduler.start()
+    taste.start_warmer()   # 预热真实听歌画像，首次对话不用等外部 API
     if not os.environ.get("TUNESYNC_SKIP_SCAN"):
         threading.Thread(target=_initial_scan, name="initial-scan", daemon=True).start()
     log_api.info("TuneSync %s 已启动", __version__)

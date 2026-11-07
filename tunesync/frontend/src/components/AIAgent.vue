@@ -390,8 +390,10 @@ async function send() {
   try {
     await api.agentChat({ message: text, recommend: recommend.value,
                           generate: generate.value, use_taste: useTaste.value }, (ev) => {
-      if (ev.type === 'thinking') { m.thinking.push(ev.text); m.phase = ev.text }
-      else if (ev.type === 'token') push(ev.text)
+      if (ev.type === 'heartbeat') {
+        if (!m.stream && !m.items.length && !m.error) m.phase = `模型思考中… ${ev.elapsed}s`
+      } else if (ev.type === 'thinking') { m.thinking.push(ev.text); m.phase = ev.text }
+      else if (ev.type === 'token') { if (!m.stream) m.phase = '模型正在输出…'; push(ev.text) }
       else if (ev.type === 'playlists') {
         flush()
         m.items = (ev.items || []).map((it) => ({ ...it, tracksOpen: false, tracksLoading: false }))

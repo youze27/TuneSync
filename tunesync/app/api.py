@@ -527,12 +527,17 @@ def agent_chat(body: dict):
                 q.put(END)
 
         threading.Thread(target=produce, name="agent-sse", daemon=True).start()
+        started, idle = time.time(), 0
         yield ": connected\n\n"
         while True:
             try:
                 ev = q.get(timeout=2)
             except queue.Empty:
+                idle += 1
                 yield ": keepalive\n\n"
+                # 模型首 token 可能要等几十秒：每 6 秒告诉前端「还在思考，已等多久」
+                if idle % 3 == 0:
+                    yield _sse({"type": "heartbeat", "elapsed": int(time.time() - started)})
                 continue
             if ev is END:
                 break

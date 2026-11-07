@@ -408,7 +408,8 @@ def _build(force=False):
 
     rows, sources = _timeline(cfg, force)
     playlists = _library_playlists(cfg)
-    _, lbz_playlists, lbz_artists = (_lbz_sources(cfg, force) if cfg["lbz_enabled"] else ([], [], []))
+    # _timeline 里已经按需刷新过 ListenBrainz，这里直接吃缓存，避免重复发 3 个请求
+    _, lbz_playlists, lbz_artists = (_lbz_sources(cfg) if cfg["lbz_enabled"] else ([], [], []))
     if not rows and not playlists:
         empty["reason"] = "还没有播放记录，多听几首歌就会生成画像"
         if sources:
@@ -479,6 +480,21 @@ def profile(force=False):
                 "reason": f"画像生成失败：{str(e)[:100]}"}
     _CACHE["at"], _CACHE["data"] = time.time(), data
     return data
+
+
+def start_warmer():
+    """后台每 4 分钟刷新一次画像，让每次对话都命中缓存、不被外部 API 拖慢。"""
+    import threading
+
+    def loop():
+        while True:
+            try:
+                profile(force=True)
+            except Exception as e:
+                log_api.debug("听歌画像预热失败：%s", e)
+            time.sleep(240)
+
+    threading.Thread(target=loop, name="taste-warmer", daemon=True).start()
 
 
 def one_line():
