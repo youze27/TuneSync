@@ -74,22 +74,22 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="每场景数量" width="100" align="center">
-          <template #default="{ row }">{{ row.count_per }}</template>
+        <el-table-column label="每次产出" width="100" align="center">
+          <template #default="{ row }">{{ row.preview?.playlists_per_run ?? row.count_per }} 张</template>
         </el-table-column>
 
         <el-table-column label="歌单来源" width="180">
           <template #default="{ row }">
             <el-tag size="small" effect="plain" :type="modeTagType(row.push_mode)">
-              {{ sourceModeLabel(row.push_mode) }}
+              {{ row.plan?.recipe?.source === 'ai' ? 'AI 创作' : '平台歌单拉取' }}
             </el-tag>
           </template>
         </el-table-column>
 
         <el-table-column label="频率" width="150">
           <template #default="{ row }">
-            <span class="mono">{{ row.cron_expr }}</span>
-            <div class="muted" style="font-size: 12px">{{ describeCron(row.cron_expr) }}</div>
+            <span>{{ row.trigger_text || row.cron_expr }}</span>
+            <div class="muted" style="font-size: 12px">下次 {{ row.next_run || '—' }}</div>
           </template>
         </el-table-column>
 
@@ -158,7 +158,9 @@ const loading = ref(false)
 const runningId = ref(null)
 const togglingId = ref(null)
 
-const tasks = computed(() => state.tasks)
+// 用新 /api/plans：列表自带 trigger_text / next_run / preview 等派生字段，
+// 不再需要前端自己把 cron 翻成人话，也不靠旧列拼凑。
+const tasks = ref([])
 
 /** 列表页「每歌单 N 首」在计划没单独设时显示全局值，与推送配置页的「跟随全局」一致。 */
 const globalTracksPer = computed(() => Number(state.settings?.llm?.tracks_per_playlist) || 30)
@@ -202,7 +204,7 @@ function describeCron(expr) {
 async function load() {
   loading.value = true
   try {
-    await loadTasks()
+    tasks.value = (await api.getPlans()) || []
   } catch (e) {
     api.toastError(e, '加载推送计划失败')
   } finally {
@@ -221,21 +223,8 @@ function openEdit(row) {
 async function toggleEnabled(row, val) {
   togglingId.value = row.id
   try {
-    await api.updateTask(row.id, {
-      name: row.name,
-      platforms: [],
-      categories: row.categories,
-      custom_prompt: row.custom_prompt || '',
-      count_per: row.count_per,
-      cron_expr: row.cron_expr,
-      enabled: val,
-      // 开关只改 enabled，但后端是整行覆盖，这些字段必须原样带回
-      push_mode: row.push_mode,
-      source_platforms: normaliseSourcePlatforms(row.source_platforms),
-      scene_mode: row.scene_mode || 'separate',
-      tracks_per: row.tracks_per || 0,
-      daily_unique: !!row.daily_unique,
-    })
+    // 新接口是 PATCH 语义，只发 enabled 一个字段，不用回传整条配置
+    await api.patchPlan(row.id, { enabled: val })
     row.enabled = val
     ElMessage.success(val ? '计划已启用' : '计划已停用')
   } catch (e) {
@@ -249,7 +238,7 @@ async function toggleEnabled(row, val) {
 async function runNow(row) {
   runningId.value = row.id
   try {
-    const r = await api.runTask(row.id)
+    const r = await api.runPlan(row.id)
     ElMessage.success(r?.detail || '已触发执行')
     await load()
     router.push('/')

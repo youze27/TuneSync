@@ -232,7 +232,8 @@ CREATE TABLE IF NOT EXISTS fetch_task(
   count_per INTEGER DEFAULT 3, cron_expr TEXT, enabled INTEGER DEFAULT 1,
   push_mode TEXT DEFAULT 'llm', source_platforms TEXT DEFAULT '["all"]',
   custom_prompt TEXT DEFAULT '', scene_mode TEXT DEFAULT 'separate',
-  tracks_per INTEGER DEFAULT 0, daily_unique INTEGER DEFAULT 0);
+  tracks_per INTEGER DEFAULT 0, daily_unique INTEGER DEFAULT 0,
+  plan_config TEXT, schema_version INTEGER DEFAULT 2);
 CREATE TABLE IF NOT EXISTS fetch_run(
   id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER, started_at TEXT,
   finished_at TEXT, status TEXT DEFAULT 'running', summary TEXT);
@@ -286,8 +287,11 @@ MIGRATIONS = [
     ("fetch_task", "scene_mode", "TEXT DEFAULT 'separate'"),
     # 每张歌单的曲目数，0 表示沿用 llm.tracks_per_playlist 全局值
     ("fetch_task", "tracks_per", "INTEGER DEFAULT 0"),
-    # 每天生成独立歌单：名称自动带日期，不再覆盖前一天的同名歌单
+    # 已废弃：歌单名保持源歌单原名，保留列只为兼容与回滚
     ("fetch_task", "daily_unique", "INTEGER DEFAULT 0"),
+    # 三段式配置的唯一事实来源（JSON），旧列保留供回滚
+    ("fetch_task", "plan_config", "TEXT"),
+    ("fetch_task", "schema_version", "INTEGER DEFAULT 2"),
     # 音源累计成功/失败次数：算历史成功率用（fail_count 是连续失败、会被清零，算不了）
     ("source", "ok_count", "INTEGER DEFAULT 0"),
     ("source", "err_count", "INTEGER DEFAULT 0"),
@@ -312,6 +316,9 @@ def init_db():
     c.executescript(INDEXES)
     c.commit()
     seed_sources()
+    # 老库迁移：把旧列翻译成三段式 plan_config（幂等，只处理空行）
+    from . import plan_model
+    plan_model.migrate_all()
 
 
 def recover_stale_runs():

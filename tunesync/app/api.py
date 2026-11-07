@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import auth, lxbridge, pipeline, platforms, recommender, resolver, scheduler, writers
+from . import auth, lxbridge, pipeline, plan_model, platforms, recommender, resolver, scheduler, writers
 from .core import (CATEGORIES, CATMAP, CONFIG, _apply_host, db, emit, host_alias,
                    kv_get, kv_set, log_api, merged_config, merged_targets, now,
                    running_in_container, source_cfg)
@@ -241,7 +241,8 @@ def test_llm(body: dict | None = None):
 _EXPORT_SECTIONS = ("scraper", "download", "naming", "library", "source_health",
                     "playlist_cleanup")
 _TASK_COLS = ("name", "platforms", "categories", "count_per", "cron_expr", "enabled",
-              "push_mode", "source_platforms", "custom_prompt", "scene_mode", "tracks_per")
+              "push_mode", "source_platforms", "custom_prompt", "scene_mode", "tracks_per",
+              "daily_unique", "plan_config", "schema_version")
 
 
 @router.get("/config/export", tags=["设置"])
@@ -257,7 +258,7 @@ def export_config():
         tasks.append({k: t.get(k) for k in _TASK_COLS})
     cfg = merged_config()
     settings = {k: cfg.get(k) for k in _EXPORT_SECTIONS if cfg.get(k)}
-    return {"kind": "tunesync-config", "version": 1, "exported_at": now(),
+    return {"kind": "tunesync-config", "version": 2, "exported_at": now(),
             "tasks": tasks, "settings": settings}
 
 
@@ -300,6 +301,17 @@ def import_config(body: dict):
                 " VALUES(?,?,?,?,?,?,?,?,?,?,?)", vals)
             n_new += 1
     db().commit()
+    # v2 导出文件带完整 plan_config，原样恢复，避免触发规则被旧列投影丢失
+    for t in body.get("tasks") or []:
+        pc = t.get("plan_config")
+        if isinstance(pc, dict):
+            pc = json.dumps(pc, ensure_ascii=False)
+        if isinstance(pc, str) and pc.strip():
+            db().execute(
+                "UPDATE fetch_task SET plan_config=?, schema_version=? WHERE name=?",
+                (pc, plan_model.SCHEMA_VERSION, str(t.get("name") or "").strip()))
+    db().commit()
+    plan_model.migrate_all()   # 旧格式任务没有 plan_config，补齐三段式配置
     settings = body.get("settings") or {}
     applied = []
     if isinstance(settings, dict):
@@ -336,7 +348,150 @@ def _check_preferences(pref):
             raise HTTPException(400, f"未知音源平台：{unknown}")
 
 
-# ------------------------------------------------------------------ 计划任务
+# ------------------------------------------------------------------ 推送计划（三段式配置）
+
+def _write_plan(name, plan, tid=None):
+    """写计划：plan_config 是唯一事实来源，同时投影回旧列保持兼容。"""
+    p = plan_model.validate(plan)
+    lg = plan_model.plan_to_legacy(p, {"id": tid, "name": name})
+    vals = (name, "[]", lg["categories"], lg["count_per"], lg["cron_expr"],
+            1 if p["trigger"]["enabled"] else 0,
+            lg["push_mode"], lg["source_platforms"], lg["custom_prompt"],
+            lg["scene_mode"], lg["tracks_per"], 0,
+            json.dumps(p, ensure_ascii=False), plan_model.SCHEMA_VERSION)
+    if tid:
+        db().execute(
+            "UPDATE fetch_task SET name=?,platforms=?,categories=?,count_per=?,cron_expr=?,"
+            "enabled=?,push_mode=?,source_platforms=?,custom_prompt=?,scene_mode=?,"
+            "tracks_per=?,daily_unique=?,plan_config=?,schema_version=? WHERE id=?",
+            (*vals, tid))
+    else:
+        db().execute(
+            "INSERT INTO fetch_task(name,platforms,categories,count_per,cron_expr,enabled,"
+            "push_mode,source_platforms,custom_prompt,scene_mode,tracks_per,daily_unique,"
+            "plan_config,schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", vals)
+    db().commit()
+    scheduler.rebuild_jobs()
+    return tid or db().execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def _plan_view(row):
+    plan, stored = plan_model.read_plan(row)
+    d = _decode(row)
+    try:
+        pv = plan_model.preview(plan)
+    except Exception as e:
+        pv = {"error": str(e)}
+    lr = db().execute("SELECT * FROM fetch_run WHERE task_id=? ORDER BY id DESC LIMIT 1",
+                      (d["id"],)).fetchone()
+    view = {
+        "id": d["id"], "name": d["name"], "plan": plan, "stored": stored,
+        "enabled": bool(plan["trigger"].get("enabled", True)),
+        "cron_expr": plan_model.derived_cron(plan["trigger"]),
+        "trigger_text": plan_model.describe_trigger(plan["trigger"]),
+        "preview": pv,
+        "running": pipeline.is_running(d["id"]),
+        "last_run": _decode(lr) if lr else None,
+        "next_run": scheduler.next_run_time(d["id"]),
+    }
+    # 旧字段投影，供尚未改造的页面/脚本继续消费
+    for k in ("categories", "count_per", "push_mode", "source_platforms",
+              "custom_prompt", "scene_mode", "tracks_per", "daily_unique"):
+        view[k] = d.get(k)
+    return view
+
+
+@router.get("/plans", tags=["推送计划"])
+def list_plans():
+    return [_plan_view(r) for r in db().execute("SELECT * FROM fetch_task ORDER BY id")]
+
+
+@router.get("/plans/default", tags=["推送计划"])
+def plan_default():
+    """新建计划的默认配置，前端不另写一份，避免两边漂移。"""
+    return plan_model.default_plan()
+
+
+@router.post("/plans", tags=["推送计划"], status_code=201)
+def create_plan(body: dict):
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "请填写计划名称")
+    try:
+        tid = _write_plan(name, body.get("plan") or plan_model.default_plan())
+    except plan_model.PlanError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "id": tid}
+
+
+@router.post("/plans/preview", tags=["推送计划"])
+def plan_preview(body: dict):
+    """纯计算：未来 5 次触发、每次产出、命名示例、下载量上限。不落库不跑流水线。"""
+    try:
+        return plan_model.preview(body.get("plan") or body)
+    except plan_model.PlanError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.patch("/plans/{tid}", tags=["推送计划"])
+def patch_plan(tid: int, body: dict):
+    """局部更新：可只发 {enabled:false} 停用时不再需要回传十几个字段。"""
+    row = db().execute("SELECT * FROM fetch_task WHERE id=?", (tid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "计划不存在")
+    plan, _ = plan_model.read_plan(row)
+    name = str(body.get("name") or row["name"]).strip()
+    if "enabled" in body:
+        plan["trigger"]["enabled"] = bool(body["enabled"])
+    incoming = body.get("plan")
+    if isinstance(incoming, dict):
+        merged = plan_model.normalize(incoming)
+        for sec in ("trigger", "recipe", "delivery"):
+            if sec in incoming:
+                plan[sec] = merged[sec]
+    try:
+        _write_plan(name, plan, tid)
+    except plan_model.PlanError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@router.put("/plans/{tid}", tags=["推送计划"])
+def put_plan(tid: int, body: dict):
+    if not db().execute("SELECT id FROM fetch_task WHERE id=?", (tid,)).fetchone():
+        raise HTTPException(404, "计划不存在")
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "请填写计划名称")
+    try:
+        _write_plan(name, body.get("plan") or plan_model.default_plan(), tid)
+    except plan_model.PlanError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@router.delete("/plans/{tid}", tags=["推送计划"])
+def remove_plan(tid: int):
+    if not db().execute("SELECT id FROM fetch_task WHERE id=?", (tid,)).fetchone():
+        raise HTTPException(404, "计划不存在")
+    db().execute("DELETE FROM fetch_task WHERE id=?", (tid,))
+    db().commit()
+    scheduler.rebuild_jobs()
+    return {"ok": True}
+
+
+@router.post("/plans/{tid}/run", tags=["推送计划"])
+def execute_plan(tid: int):
+    if not db().execute("SELECT id FROM fetch_task WHERE id=?", (tid,)).fetchone():
+        raise HTTPException(404, "计划不存在")
+    if pipeline.is_running(tid) or not pipeline.run_async(tid):
+        raise HTTPException(409, "该计划已在队列中或正在运行")
+    q = pipeline.queue_state()
+    return {"ok": True, "detail": "已排入推送队列" if q["depth"] else "已触发后台执行",
+            "queue_depth": q["depth"]}
+
+
+# ------------------------------------------------------------------ 计划任务（旧接口兼容）
 
 class TaskIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)

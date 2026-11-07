@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from string import Formatter
 
-from . import platforms, recommender, resolver, scraper, writers
+from . import plan_model, platforms, recommender, resolver, scraper, writers
 from .core import CATMAP, db, emit, log_pipeline, merged_config, merged_targets, now
 
 PUSH_MODES = ("llm", "source_llm", "source_raw")
@@ -194,12 +194,17 @@ def run_task(task_id, pre_acquired=False):
     因此重入会撞上已占好的位置被挡掉——cron 触发与手动触发撞车时只真跑一次。
     """
     conn = db()
-    task = conn.execute("SELECT * FROM fetch_task WHERE id=?", (task_id,)).fetchone()
-    if not task:
+    row = conn.execute("SELECT * FROM fetch_task WHERE id=?", (task_id,)).fetchone()
+    if not row:
         log_pipeline.error("任务 #%s 不存在", task_id)
         if pre_acquired:
             _release(f"task-{task_id}")
         return None
+    # 三段式配置是唯一事实来源：投影成旧行形状后交给流水线内核。
+    # 平台模式因此恒为 source_raw（无 AI 筛选）、搜索词恒由场景决定、
+    # 歌单名恒保持源歌单原名（不加日期）。
+    plan, _ = plan_model.read_plan(row)
+    task = plan_model.plan_to_legacy(plan, row)
     return _execute(task, task_id, task["name"], f"task-{task_id}", pre_acquired=pre_acquired)
 
 
@@ -568,7 +573,8 @@ def _run(task, run_id):
     categories = json.loads(task["categories"] or "[]")
     count = max(1, task["count_per"] or 3)
     prompt = str(task.get("custom_prompt") or task.get("prompt") or "").strip()
-    naming = merged_config().get("naming", {}).get("playlist", "{name}")
+    naming = (task.get("name_template") or
+              merged_config().get("naming", {}).get("playlist", "{name}"))
     push_mode = push_mode_of(task)
     source_plats = source_platforms_of(task)
     scene_mode = scene_mode_of(task)
@@ -621,10 +627,8 @@ def _run(task, run_id):
                     naming, category=cat_name, name=pl.get("name", ""),
                     platform=_platform_label(pl["platform"]),
                     date=date.today().isoformat())
-                # 「每天生成独立歌单」：名称追加日期，避免目标端同名歌单被
-                # upsert 覆盖，看起来永远只有同一张。
-                if task.get("daily_unique"):
-                    final_name = f"{final_name} · {date.today().strftime('%m-%d')}"
+                # 歌单名保持源歌单原名：不重样由内容层硬去重保证，
+                # 不再靠给名字加日期区分，时间粒度也不该由「每日」硬编码。
                 job["name"] = final_name
                 conn.execute(
                     "INSERT OR IGNORE INTO playlist(platform,source_id,name,category) VALUES(?,?,?,?)",

@@ -8,7 +8,7 @@ import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from . import pipeline, resolver, writers
+from . import pipeline, plan_model, resolver, writers
 from .core import CONFIG, db, log_api, merged_config, merged_targets
 
 _sched = None
@@ -136,21 +136,32 @@ def _rebuild_auto_scrape():
 
 
 def rebuild_jobs():
-    """按 fetch_task 表重建全部定时任务。"""
+    """按 fetch_task.plan_config 重建全部定时任务。
+
+    触发类型与错过策略都由配置决定；老行（还没迁移）由 read_plan 实时投影，
+    因此升级过程中不会出现「计划突然不跑了」。
+    """
     if _sched is None:
         return 0
+    # 旧 /api/tasks 兼容接口写入的行没有 plan_config，在这里统一补齐
+    plan_model.migrate_all()
     for j in list(_sched.get_jobs()):
         if j.id.startswith("task-"):
             j.remove()
     added = 0
-    for t in db().execute("SELECT * FROM fetch_task WHERE enabled=1"):
+    for row in db().execute("SELECT * FROM fetch_task"):
         try:
-            _sched.add_job(_run_task, parse_cron(t["cron_expr"]), id=f"task-{t['id']}",
-                           args=[t["id"]], replace_existing=True,
-                           misfire_grace_time=3600, coalesce=True, max_instances=1)
+            plan, _ = plan_model.read_plan(row)
+            cfg = plan["trigger"]
+            if not cfg.get("enabled", True):
+                continue
+            grace, coalesce = plan_model.misfire_options(cfg)
+            _sched.add_job(_run_task, plan_model.build_trigger(cfg), id=f"task-{row['id']}",
+                           args=[row["id"]], replace_existing=True,
+                           misfire_grace_time=grace, coalesce=coalesce, max_instances=1)
             added += 1
         except Exception as e:
-            log_api.error("任务 #%s 的 cron「%s」无效：%s", t["id"], t["cron_expr"], e)
+            log_api.error("计划 #%s 触发配置无效：%s", row["id"], e)
     return added
 
 

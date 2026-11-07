@@ -175,3 +175,17 @@ export const batchDeletePlaylists = (target, ids) =>
 /** 按生成时间清理老旧歌单。dry_run=true 只预览将被删的清单。 */
 export const cleanupPlaylists = (body) =>
   http.post('/playlists/cleanup', body, { timeout: 180000 })
+
+// ───────────────────────────── 推送计划（三段式配置）
+/** 计划列表含 trigger_text / next_runs / preview / last_run 等派生字段。 */
+export const getPlans = () => http.get('/plans')
+/** 新建计划默认配置由后端下发，前端不另写一份。 */
+export const getDefaultPlan = () => http.get('/plans/default')
+export const createPlan = (body) => http.post('/plans', body)
+export const putPlan = (id, body) => http.put(`/plans/${id}`, body)
+/** 局部更新：只发 { enabled:false } 就能停用，不必回传整条配置。 */
+export const patchPlan = (id, body) => http.patch(`/plans/${id}`, body)
+export const deletePlan = (id) => http.delete(`/plans/${id}`)
+export const runPlan = (id) => http.post(`/plans/${id}/run`)
+/** 执行预览：纯计算，不落库不跑流水线。 */
+export const previewPlan = (plan) => http.post('/plans/preview', { plan })
