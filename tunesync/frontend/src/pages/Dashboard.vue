@@ -9,9 +9,6 @@
       @close="state.error = ''"
     />
 
-    <!-- AI 音乐智能体：首页主入口，独立于推送计划 -->
-    <AIAgent />
-
     <!-- 没有任何计划任务时的引导 -->
     <el-card v-if="bootedEmpty" shadow="never" class="mb-12 guide-card">
       <div class="guide-inner">
@@ -310,7 +307,6 @@ import { Calendar, Clock, DataAnalysis, FolderChecked, FolderOpened, Files, Head
 import * as api from '../api.js'
 import HealthTag from '../components/HealthTag.vue'
 import StatCard from '../components/StatCard.vue'
-import AIAgent from '../components/AIAgent.vue'
 import { anyRunning, catName, liveRun, refreshDashboard, stageLabel, state } from '../store.js'
 import { fmtAgo, fmtDuration, fmtTime, runStatusTag, summaryOf, trackStatusTag } from '../utils.js'
 

@@ -52,8 +52,13 @@ services:
       # 飞牛封面实体文件目录：歌单封面必须落在这里的 playlist 子目录，
       # 飞牛 App 才显示（cover_guid 只是引用，实体在 track/album 目录它不去找）。
       - ${TS_FEINIU_COVER:-/vol1/@appmeta/trim.music/cover}:/feiniu-cover:rw
+      # AI 智能体听歌画像：只会读，不会写这两个目录
+      - ${TS_SPINDLE_DIR:-/vol1/docker/volumes/spindle_spindle-data/_data}:/spindle:ro
+      - ${TS_NAVIDROME_DIR:-/vol1/1000/navidrome/data}:/nddata:ro
     environment:
       - TZ=Asia/Shanghai
+      - SPINDLE_DB=/spindle/stats.db
+      - NAVIDROME_DB=/nddata/navidrome.db
       # 同机服务（Navidrome / 飞牛网关 / 音源）在 config.yaml 里一律写 127.0.0.1，
       # 容器内会自动换成这个地址。只有当服务以另一个容器运行且不发布端口时，
       # 才需要在这里填那个容器的服务名或 IP；默认留空即可。

@@ -4,6 +4,7 @@
 """
 import json
 import os
+import queue
 import re
 import threading
 import time
@@ -12,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import agent, auth, lxbridge, pipeline, plan_model, platforms, recommender, resolver, scheduler, writers
+from . import agent, auth, lxbridge, pipeline, plan_model, platforms, recommender, resolver, scheduler, taste, writers
 from .core import (CATEGORIES, CATMAP, CONFIG, _apply_host, db, emit, host_alias,
                    kv_get, kv_set, log_api, merged_config, merged_targets, now,
                    running_in_container, source_cfg)
@@ -505,18 +506,71 @@ def agent_config():
 
 @router.post("/agent/chat", tags=["AI 助手"])
 def agent_chat(body: dict):
-    """流式对话。事件：thinking / token / playlists / creating / created / memory / done / error。"""
+    """流式对话。事件：thinking / token / playlists / creating / created / memory / done / error。
+
+    单独起一个生产线程 + 队列，而不是直接在响应生成器里跑 agent.run()：
+    模型首 token 之前可能有 20 秒以上的空窗，这段时间必须持续吐注释帧，
+    否则反代 / 浏览器会把整段 SSE 攒到结束才交给前端（表现为「一次性蹦出来」）。
+    """
     def stream():
-        try:
-            for ev in agent.run(body or {}):
-                yield _sse(ev)
-        except Exception as e:
-            log_api.error("智能体异常：%s", e)
-            yield _sse({"type": "error", "message": f"智能体异常：{str(e)[:180]}"})
+        q = queue.Queue()
+        END = object()
+
+        def produce():
+            try:
+                for ev in agent.run(body or {}):
+                    q.put(ev)
+            except Exception as e:
+                log_api.error("智能体异常：%s", e)
+                q.put({"type": "error", "message": f"智能体异常：{str(e)[:180]}"})
+            finally:
+                q.put(END)
+
+        threading.Thread(target=produce, name="agent-sse", daemon=True).start()
+        yield ": connected\n\n"
+        while True:
+            try:
+                ev = q.get(timeout=2)
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                continue
+            if ev is END:
+                break
+            yield _sse(ev)
+
     return StreamingResponse(
         stream(), media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
-                 "Connection": "keep-alive"})
+        headers={"Cache-Control": "no-cache, no-transform", "Pragma": "no-cache",
+                 "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
+
+@router.get("/agent/taste", tags=["AI 助手"])
+def agent_taste(refresh: bool = False):
+    """真实听歌画像（Spindle / Navidrome / ListenBrainz），给「个性化」面板用。"""
+    return taste.profile(force=bool(refresh))
+
+
+@router.get("/agent/history", tags=["AI 助手"])
+def agent_history(limit: int = 40):
+    """对话历史：页面重载后把之前的对话还原进聊天窗口。"""
+    return {"messages": agent.chat_history(min(100, max(1, limit)))}
+
+
+@router.delete("/agent/history", tags=["AI 助手"])
+def agent_history_clear():
+    agent.clear_chat()
+    return {"ok": True}
+
+
+@router.get("/agent/tracks", tags=["AI 助手"])
+def agent_tracks(platform: str = "", id: str = ""):
+    """歌单卡片「歌曲列表」下拉的懒加载数据源。"""
+    if not platform or not id:
+        raise HTTPException(400, "缺少 platform / id")
+    try:
+        return {"tracks": agent.playlist_tracks(platform, id)}
+    except Exception as e:
+        raise HTTPException(502, f"拉取曲目失败：{str(e)[:120]}")
 
 
 @router.get("/agent/memories", tags=["AI 助手"])

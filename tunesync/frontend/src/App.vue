@@ -90,7 +90,7 @@
 
       <el-main class="ts-main">
         <router-view v-slot="{ Component }">
-          <keep-alive :include="['Dashboard']">
+          <keep-alive :include="['Dashboard', 'AIAssistant']">
             <component :is="Component" />
           </keep-alive>
         </router-view>
@@ -159,7 +159,8 @@ watch(isNarrow, (narrow) => {
 })
 
 const menus = [
-  { path: '/', label: '仪表盘', icon: 'Odometer' },
+  { path: '/ai', label: 'AI 音乐助手', icon: 'ChatDotRound' },
+  { path: '/dashboard', label: '仪表盘', icon: 'Odometer' },
   { path: '/tasks', label: '推送计划', icon: 'Calendar' },
   { path: '/push-config', label: '新建计划', icon: 'Operation' },
   { path: '/sources', label: '音源管理', icon: 'Headset' },

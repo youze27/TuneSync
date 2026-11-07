@@ -197,6 +197,11 @@ export const addAgentMemory = (content) => http.post('/agent/memories', { conten
 export const delAgentMemory = (id) => http.delete(`/agent/memories/${id}`)
 export const createAgentPlaylists = (items, indexes) =>
   http.post('/agent/create', { items, indexes }, { timeout: 60000 })
+export const getAgentTaste = (refresh = false) => http.get('/agent/taste', { params: { refresh } })
+export const getAgentHistory = (limit = 40) => http.get('/agent/history', { params: { limit } })
+export const clearAgentHistory = () => http.delete('/agent/history')
+export const getAgentTracks = (platform, id) =>
+  http.get('/agent/tracks', { params: { platform, id }, timeout: 30000 })
 
 /**
  * SSE 流式对话。onEvent 逐条收到 {type, ...}；流结束 resolve。
@@ -205,8 +210,13 @@ export const createAgentPlaylists = (items, indexes) =>
 export async function agentChat(body, onEvent) {
   const resp = await fetch('/api/agent/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+    },
     credentials: 'same-origin',
+    cache: 'no-store',
     body: JSON.stringify(body),
   })
   if (resp.status === 401) {
@@ -221,14 +231,18 @@ export async function agentChat(body, onEvent) {
     const { done, value } = await reader.read()
     if (done) break
     buf += decoder.decode(value, { stream: true })
+    // 逐「行」立即派发：不再等 \n\n 空行分帧。代理把多帧合并成一个 chunk，
+    // 或把一帧拆成两个 chunk 时，这个写法都能立刻把 data: 行交出去。
     let i
-    while ((i = buf.indexOf('\n\n')) >= 0) {
-      const block = buf.slice(0, i)
-      buf = buf.slice(i + 2)
-      for (const line of block.split('\n')) {
-        if (!line.startsWith('data:')) continue
-        try { onEvent(JSON.parse(line.slice(5).trim())) } catch { /* 忽略坏帧 */ }
-      }
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).replace(/\r$/, '')
+      buf = buf.slice(i + 1)
+      if (!line.startsWith('data:')) continue   // ': keepalive' 注释帧
+      try { onEvent(JSON.parse(line.slice(5).trim())) } catch { /* 忽略坏帧 */ }
     }
+  }
+  const tail = buf.trim()
+  if (tail.startsWith('data:')) {
+    try { onEvent(JSON.parse(tail.slice(5).trim())) } catch { /* 忽略坏帧 */ }
   }
 }

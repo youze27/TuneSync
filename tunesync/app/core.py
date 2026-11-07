@@ -268,6 +268,10 @@ CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS agent_memory(
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, content TEXT,
   payload TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS agent_chat(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, content TEXT,
+  payload TEXT, created_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_agent_chat_id ON agent_chat(id);
 """
 
 # 老版本库可能缺列，启动时补齐（ADD COLUMN 幂等）

@@ -3,7 +3,10 @@ import { auth, loadAuth } from './store.js'
 
 const routes = [
   { path: '/login', name: 'login', component: () => import('./pages/Login.vue'), meta: { title: '登录' } },
-  { path: '/', name: 'dashboard', component: () => import('./pages/Dashboard.vue'), meta: { title: '仪表盘' } },
+  // 登录后默认落在 AI 助手；仪表盘保留独立路径，是导航里的第二项。
+  { path: '/', redirect: '/ai' },
+  { path: '/ai', name: 'ai', component: () => import('./pages/AIAssistant.vue'), meta: { title: 'AI 音乐助手' } },
+  { path: '/dashboard', name: 'dashboard', component: () => import('./pages/Dashboard.vue'), meta: { title: '仪表盘' } },
   { path: '/tasks', name: 'tasks', component: () => import('./pages/Tasks.vue'), meta: { title: '推送计划' } },
   { path: '/push-config', name: 'push-config', component: () => import('./pages/PlanEditor.vue'), meta: { title: '推送计划编辑' } },
   { path: '/sources', name: 'sources', component: () => import('./pages/Sources.vue'), meta: { title: '音源管理' } },

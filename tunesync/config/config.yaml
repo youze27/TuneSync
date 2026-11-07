@@ -156,3 +156,21 @@ sources:
       url: "http://antiserver.kuwo.cn/anti.s?type=convert_url3&br={quality}&rid={id}&response=url"
       url_paths: ["url"]
       quality_map: { flac: "2000kflac", "320": "320kmp3", "128": "128kmp3", "96": "128kmp3" }
+
+
+# ── AI 智能体的听歌画像 ───────────────────────────────
+# 只读，不写入下面这些库。容器内的路径由 docker-compose 以 :ro 挂载；
+# 也可以用环境变量 SPINDLE_DB / NAVIDROME_DB 覆盖（换 NAS 路径不用改代码）。
+# 数据源：Spindle play_events + Navidrome scrobbles/annotation/playlist + ListenBrainz listens。
+taste:
+  enabled: true
+  spindle_db: /spindle/stats.db
+  navidrome_db: /nddata/navidrome.db
+  lookback_days: 30       # 画像只看最近多少天
+  recent_limit: 30        # 注入模型的最近播放曲目数
+  playlist_limit: 18      # 注入模型的「曲库已有歌单」数，用于避免主题雷同
+  user: ""                # 只统计某个 Spindle 用户；留空=全部
+  listenbrainz:
+    enabled: true
+    user: ""              # 留空时自动取 Navidrome 的 user.user_name
+    token: ""             # 留空时自动取 Navidrome 的 user_props.ListenBrainzSessionKey
