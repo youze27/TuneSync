@@ -82,6 +82,10 @@ def normalize(raw):
         out["recipe"]["topic"].update(
             {k: v for k, v in raw["recipe"]["topic"].items() if k in out["recipe"]["topic"]})
     out["schema_version"] = SCHEMA_VERSION
+    # 旧计划常把 all 与具体平台一起勾上；all 已含 kg/kw/mg，留着只会重复请求
+    plats = out["recipe"]["platforms"]
+    if "all" in plats and len(plats) > 1:
+        out["recipe"]["platforms"] = [x for x in plats if x != "all"]
     return out
 
 
@@ -225,20 +229,22 @@ def derived_cron(cfg):
 
 
 def next_fires(cfg, count=5, tz=None):
-    """未来 N 次触发时间（字符串列表）。"""
-    import zoneinfo
-    try:
-        z = zoneinfo.ZoneInfo(tz or CONFIG.get("server", {}).get("timezone", "Asia/Shanghai"))
-    except Exception:
-        z = None
+    """未来 N 次触发时间（字符串列表）。
+
+    容器已按 server.timezone 设好 TZ，这里统一用本地 naive datetime，与未
+    显式指定时区的 trigger 保持一致。每次迭代必须把 now 推进到上次触发时刻：
+    CronTrigger 内部用 min(now, previous+1us) 取起点，now 不动的话会连续
+    算出同一个时间（曾经导致预览卡显示 5 行重复日期）。
+    """
     trig = build_trigger(cfg)
-    now = datetime.now(tz=z) if z else datetime.now()
+    now = datetime.now()
     out, cur = [], None
     for _ in range(count):
         cur = trig.get_next_fire_time(cur, now)
         if cur is None:
             break
         out.append(cur.strftime("%Y-%m-%d %H:%M"))
+        now = cur
     return out
 
 
