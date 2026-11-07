@@ -656,33 +656,47 @@ def _safe_format(tpl, **kw):
 
 
 def _rotate_candidates(candidates, task_hint=""):
-    """让「每次都推热榜第一张」变成「每天换一批」。
+    """让「每次拉到的歌单都不重样」：已推过的源歌单优先排除。
 
-    以「任务 + 当天日期」为种子做确定性洗牌：同一天重跑结果稳定（幂等），
-    不同日期顺序不同，source_raw 取前 N 张自然每天不同；再把近 14 天
-    已经推过的 source_id 稳定地排到后面，尽量不重复。候选池不够时仍会
-    复用旧歌单，不至于没歌可推。
+    以「任务 + 场景 + 当天日期」为种子做确定性洗牌（同一次运行幂等），
+    再按「是否推过」分成两段：从没推过的排前面，推过的按「最久没推」
+    排后面。source_raw 取前 N 张、以及详情失败时向后补齐，都会先消耗
+    没推过的；只有整个候选池都推过时才回退复用，并写日志告警。
+
+    去重依据 run_playlist.source_id（= md5(平台|歌单ID)），跨计划、跨全部
+    历史生效——用户在手机里看到的是同一个曲库，哪条计划推的并不重要，
+    重复就是重复。歌单名保持源歌单原名，不靠加日期/加前缀来区分。
     """
     if not candidates:
         return candidates
     out = list(candidates)
     random.Random(f"{task_hint}|{date.today().isoformat()}").shuffle(out)
+
+    def sid(c):
+        raw = f"{c.get('platform', '')}|{c.get('id', '')}".encode("utf-8")
+        return hashlib.md5(raw).hexdigest()[:12]
+
+    seen = {}
     try:
-        recent = {
-            r["source_id"] for r in db().execute(
-                "SELECT rp.source_id FROM run_playlist rp "
-                "JOIN fetch_run fr ON fr.id = rp.run_id "
-                "WHERE fr.started_at >= datetime('now','-14 day') "
-                "AND rp.source_id IS NOT NULL")
-        }
-    except Exception:
-        recent = set()
-    if recent:
-        def sid(c):
-            raw = f"{c.get('platform', '')}|{c.get('id', '')}".encode("utf-8")
-            return hashlib.md5(raw).hexdigest()[:12]
-        out.sort(key=lambda c: sid(c) in recent)
-    return out
+        for r in db().execute(
+                "SELECT source_id, MAX(run_id) AS last_run FROM run_playlist "
+                "WHERE source_id IS NOT NULL GROUP BY source_id"):
+            seen[r["source_id"]] = int(r["last_run"] or 0)
+    except Exception as e:
+        log_pipeline.warning("读取已推歌单历史失败，本轮退化为仅按日期轮换：%s", e)
+        return out
+
+    fresh = [c for c in out if sid(c) not in seen]
+    used = [c for c in out if sid(c) in seen]
+    used.sort(key=lambda c: seen.get(sid(c), 0))
+    if not fresh:
+        log_pipeline.warning(
+            "候选 %s 张全部推送过，本轮按「最久未推」复用（%s）；建议扩大来源平台或换关键词",
+            len(out), task_hint)
+    else:
+        log_pipeline.info("候选 %s 张：未推过 %s 张优先，已推过 %s 张排到最后",
+                          len(out), len(fresh), len(used))
+    return fresh + used
 
 
 def _platform_label(platform):
@@ -739,11 +753,13 @@ def _fetch_source_playlists(push_mode, source_plats, scene, count, prompt):
         raise RuntimeError("音源平台没有返回任何候选歌单"
                            + (f"（{len(errors)} 个平台失败）" if errors else ""))
 
+    # 先按「没推过优先」排好整个候选池：选中和详情失败时的向后补齐
+    # 都从同一份顺序里取，避免补齐时又补回已经推过的歌单。
+    rotated = _rotate_candidates(candidates, f"{push_mode}|{scene}|{keyword}")
     if push_mode == "source_llm":
-        picked = recommender.select_playlists(candidates, scene, count, prompt=prompt)
+        picked = recommender.select_playlists(rotated, scene, count, prompt=prompt)
     else:
-        # 旧实现固定 candidates[:count]，热榜第一页不变就天天推同一张。
-        picked = _rotate_candidates(candidates, f"{push_mode}|{scene}|{keyword}")[:count]
+        picked = rotated[:count]
     if not picked:
         raise RuntimeError("没有选中任何歌单")
 
@@ -758,7 +774,7 @@ def _fetch_source_playlists(push_mode, source_plats, scene, count, prompt):
         # 挑中的几张里若有隐私歌单/平台空返回，继续从候选池往后补齐；
         # 旧实现只有「一张都没取到」才补，导致静默少推。
         chosen = {(c["platform"], c["id"]) for c in picked}
-        for c in candidates:
+        for c in rotated:
             if (c["platform"], c["id"]) in chosen:
                 continue
             pl = _load_source_playlist(c)
